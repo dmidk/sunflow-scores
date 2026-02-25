@@ -1,0 +1,19 @@
+# Python & uv virtual environment
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# IDEs (VS Code, PyCharm)
+.vscode/
+.idea/
+
+# Data Files (CRITICAL: Do not upload massive NetCDF files to Git!)
+*.nc
+*.grib
+*.grb
+*.zarr
+/data/
