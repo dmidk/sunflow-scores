@@ -16,4 +16,3 @@ __pycache__/
 *.grib
 *.grb
 *.zarr
-/data/

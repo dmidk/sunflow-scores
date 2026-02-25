@@ -11,20 +11,26 @@ class SatelliteNowcastLoader:
 
     def _extract_time_from_filename(self, ds: xr.Dataset) -> xr.Dataset:
         """
-        A helper function just in case your NetCDF files only contain 2D (lat/lon) 
-        data and don't explicitly have a 'time' dimension built inside them.
-        This reads the filename and assigns the time coordinate.
+        Extracts time from filename and handles existing 'time' variables safely.
         """
-        # Get the filename from the encoding dictionary xarray creates
+        # 1. Clear out any existing 'time' to prevent the ValueError
+        if 'time' in ds.variables or 'time' in ds.coords:
+            # Renaming is safer than dropping in some NetCDF versions
+            ds = ds.rename({'time': 'time_file_internal'})
+        
+        # 2. Get the filename
         filename = ds.encoding.get("source", "")
         
-        # Extract the YYYYMMDDHHMM part (e.g., '202601021215')
+        # 3. Parse the date (Choose the logic based on which loader this is)
+        # For Nowcasts:
         time_str = Path(filename).stem.split("_")[-1]
-        
-        # Convert to a pandas datetime object
         dt = pd.to_datetime(time_str, format="%Y%m%d%H%M")
         
-        # Expand the 2D dataset to 3D by adding the time dimension
+        # For Observations (uncomment this if editing the Obs loader):
+        # time_str = Path(filename).stem.split("_sds_")[-1]
+        # dt = pd.to_datetime(time_str, format="%Y-%m-%dT%H_%M_%SZ")
+        
+        # 4. Assign the new dimension
         return ds.assign_coords(time=dt).expand_dims("time")
 
     def load_data(self, start_date: str, end_date: str) -> xr.Dataset:
@@ -43,7 +49,7 @@ class SatelliteNowcastLoader:
                 concat_dim="time",
                 preprocess=self._extract_time_from_filename, # Assigns time from filename
                 parallel=True, # Uses dask to speed up reading
-                engine="netcdf4"
+                engine="h5netcdf"
             )
         except Exception as e:
             raise RuntimeError(f"Failed to load NetCDF files: {e}")
@@ -56,65 +62,34 @@ class SatelliteNowcastLoader:
     
 
 
-def evaluate_nowcast(obs_ds: xr.Dataset, fcst_ds: xr.Dataset, ghi_threshold: float):
-    """
-    Evaluates a satellite GHI nowcast against observed GHI satellite images.
-    Expects xarray Datasets with matching 'time', 'lat', and 'lon' coordinates.
-    """
-    
-    # 1. Standard Continuous Metrics (Point-by-point)
-    # Good for general bias, but harsh on spatial displacement
-    mae = scores.continuous.mae(fcst_ds['GHI'], obs_ds['GHI'], preserve_dims=['time'])
-    rmse = scores.continuous.rmse(fcst_ds['GHI'], obs_ds['GHI'], preserve_dims=['time'])
-    
-    # 2. Spatial Metrics (Fractions Skill Score)
-    # Converts GHI to a binary threshold (e.g., "Is GHI > 300 W/m2?") 
-    # and compares neighborhoods.
-    obs_binary = obs_ds['GHI'] > ghi_threshold
-    fcst_binary = fcst_ds['GHI'] > ghi_threshold
-    
-    # Calculate FSS over a specified spatial window (e.g., 5x5 pixels)
-    # Note: Window sizes depend on your satellite grid resolution
-    fss = scores.spatial.fss(
-        fcst=fcst_binary, 
-        obs=obs_binary, 
-        window_size=[5, 5], 
-        spatial_dims=['lat', 'lon']
-    )
-    
-    # Combine results into a single dataset for easy plotting in Streamlit
-    results = xr.Dataset({
-        'MAE': mae,
-        'RMSE': rmse,
-        'FSS': fss
-    })
-    
-    return results
-
 class SatelliteObservationLoader:
     def __init__(self, data_dir: str = "/dmidata/projects/energivejr/satellite_data"):
         self.data_dir = Path(data_dir)
 
     def _extract_time_from_filename(self, ds: xr.Dataset) -> xr.Dataset:
         """
-        Extracts time from filenames like NetCDF4_sds_2026-02-24T08_15_00Z.nc
+        Extracts time from filename and handles existing 'time' variables safely.
         """
+        # 1. Clear out any existing 'time' to prevent the ValueError
+        if 'time' in ds.variables or 'time' in ds.coords:
+            # Renaming is safer than dropping in some NetCDF versions
+            ds = ds.rename({'time': 'time_file_internal'})
+        
+        # 2. Get the filename
         filename = ds.encoding.get("source", "")
         
-        # Extract the '2026-02-24T08_15_00Z' part
-        # Path(filename).stem removes the '.nc'
-        time_str = Path(filename).stem.split("_sds_")[-1]
+        # 3. Parse the date (Choose the logic based on which loader this is)
+        # For Nowcasts:
+        time_str = Path(filename).stem.split("_")[-1]
+        dt = pd.to_datetime(time_str, format="%Y%m%d%H%M")
         
-        # Parse the datetime using pandas
-        dt = pd.to_datetime(time_str, format="%Y-%m-%dT%H_%M_%SZ")
+        # For Observations (uncomment this if editing the Obs loader):
+        # time_str = Path(filename).stem.split("_sds_")[-1]
+        # dt = pd.to_datetime(time_str, format="%Y-%m-%dT%H_%M_%SZ")
         
-        # Strip timezone info to keep it naive (assuming your nowcasts are also naive UTC)
-        # This prevents xarray from silently failing during alignment
-        if dt.tzinfo is not None:
-            dt = dt.tz_localize(None)
-            
+        # 4. Assign the new dimension
         return ds.assign_coords(time=dt).expand_dims("time")
-
+    
     def load_data(self, start_date: str, end_date: str) -> xr.Dataset:
         """
         Lazily loads the ground truth satellite files.
@@ -128,7 +103,7 @@ class SatelliteObservationLoader:
                 concat_dim="time",
                 preprocess=self._extract_time_from_filename,
                 parallel=True, 
-                engine="netcdf4"
+                engine="h5netcdf"
             )
         except Exception as e:
             raise RuntimeError(f"Failed to load observation NetCDF files: {e}")
@@ -141,7 +116,7 @@ class SatelliteObservationLoader:
         
         return ds_filtered
 
-class NowcastEvaluator:
+class ScoresCalculator:
     def __init__(self, obs_ds: xr.Dataset, fcst_ds: xr.Dataset):
         """
         Initializes the evaluator with observation and forecast datasets.
