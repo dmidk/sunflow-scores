@@ -21,13 +21,14 @@ We use uv for dependency management. It is extremely fast and ensures that every
 Step 1: Install uv (One-time setup)
 If you do not already have uv installed on your machine or the DMI server, run this command:
 
-`curl -LsSf [https://astral.sh/uv/install.sh](https://astral.sh/uv/install.sh) | sh `
+`curl -LsSf https://astral.sh/uv/install.sh | sh `
 (You may need to restart your terminal after this completes).
 
 Step 2: Clone the Repository
 Download the project code from DMI's GitLab to your local machine or server. Open your terminal and run:
 
 `git clone git@gitlab.dmi.dk:yourusername/NowcastingValidation.git`
+
 `cd NowcastingValidation`
 (Note: Replace your username with the appropriate GitLab path if this lives in a shared DMI group).
 
