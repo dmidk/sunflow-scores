@@ -43,11 +43,16 @@ What this does: uv will read the uv.lock file, automatically download the correc
 ## 📂 Project Structure
 ```text
 NowcastingValidation/
-├── validator.py              # Core OOP classes (Data Loaders & Evaluator)
-├── notebooks/                # Jupyter Notebooks for analysis and plotting
+├── validator.py              # Core library: SatelliteNowcastLoader,
+│                             #   SatelliteObservationLoader, ScoreCalculator
+├── run_validation.py         # Batch Validation Script: loads data, computes MAE/RMSE,
+│                             #   writes results to results/ as NetCDF
+├── plot_results.py           # Plots nowcast vs. observation sequence and
+│                             #   MAE/RMSE vs. lead time (terminal or notebook)
+├── notebooks/
+│   ├── solar-nowcast-loader-notebook.ipynb     # Explore a single nowcast run
+│   └── solar-nowcast-validator-notebook.ipynb  # Full validation workflow
 ├── pyproject.toml            # uv dependency definitions
 ├── uv.lock                   # Strictly locked dependency hashes
-├── .gitignore                # Protects the repo from massive data files
+├── .gitignore                # Excludes data files and results
 └── README.md
-
-
