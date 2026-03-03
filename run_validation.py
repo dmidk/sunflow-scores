@@ -101,7 +101,7 @@ def main() -> None:
     # 3. Align and compute into memory
     # ------------------------------------------------------------------
     t2 = time.perf_counter()
-    print("Step 3/4 — Aligning and computing (this is the slow step)...")
+    print("Step 3/4 — Aligning and computing (this will take time)...")
     scorer = ScoreCalculator(nowcast_ds, obs_ds)
     scorer.align_data()
     scorer.aligned_data = scorer.aligned_data.compute()

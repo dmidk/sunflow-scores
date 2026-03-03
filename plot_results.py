@@ -3,7 +3,7 @@ plot_results.py — Solar Nowcast Visualisation
 ==============================================
 Produces two figures:
 
-  1. Nowcast vs. Observation sequence
+  1. Nowcast vs. Observation     
      A 2-row grid of maps (Nowcast | Observation) stepping through the first
      N lead times of a chosen initialization run.
 
@@ -57,6 +57,11 @@ def parse_args() -> argparse.Namespace:
                    help="Stride between plotted lead steps (1 = every 15 min)")
     p.add_argument("--vmin", type=float, default=0,   help="Colourbar minimum (W/m²)")
     p.add_argument("--vmax", type=float, default=900, help="Colourbar maximum (W/m²)")
+    p.add_argument("--bbox", type=float, nargs=4, default=None,
+                   metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"),
+                   help="Zoom to bounding box, e.g. --bbox 7.5 54.5 13.0 58.0")
+    p.add_argument("--show-diff", action="store_true",
+                   help="Add a third row showing Nowcast − Observation difference")
 
     # --- scores plot ---
     p.add_argument("--scores-start", default=None,
@@ -95,26 +100,41 @@ def plot_sequence(args: argparse.Namespace) -> None:
     init_ts = pd.Timestamp(args.init)
     print(f"\nLoading nowcast for {init_ts} ...")
     nwc_loader = SatelliteNowcastLoader(data_dir=args.nwc_dir)
-    nowcast_ds = nwc_loader.load_data(init_ts, init_ts)
+    nowcast_ds = nwc_loader.load_data(init_ts, init_ts).compute()
 
     obs_end = init_ts + pd.Timedelta(nowcast_ds.lead_time.max().values)
     print(f"Loading observations up to {obs_end} ...")
     obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir)
-    obs_ds = obs_loader.load_data(init_ts, obs_end)
+    try:
+        obs_ds = obs_loader.load_data(init_ts, obs_end).compute()
+    except ValueError:
+        print("  No observation files found — plotting nowcast only.")
+        obs_ds = None
 
     INIT_IDX   = 0
     lead_steps = range(0, args.n_steps * args.step_every, args.step_every)
     n_steps    = len(lead_steps)
     init_time  = nowcast_ds.initialization_time.values[INIT_IDX]
 
+    # Optional spatial subset
+    bbox = getattr(args, "bbox", None)
+    if bbox is not None:
+        lon_min, lat_min, lon_max, lat_max = bbox
+    else:
+        lon_min = lon_max = lat_min = lat_max = None
+
+    show_diff = getattr(args, "show_diff", False)
+    n_rows    = 3 if show_diff else 2
+    row_labels = ["Nowcast", "Observation", "Difference (NWC − OBS)"]
+
     fig, axes = plt.subplots(
-        2, n_steps,
-        figsize=(3.5 * n_steps, 5),
+        n_rows, n_steps,
+        figsize=(3.5 * n_steps, 2.7 * n_rows),
         subplot_kw={"projection": ccrs.PlateCarree()},
         constrained_layout=True,
     )
 
-    for row, label in enumerate(["Nowcast", "Observation"]):
+    for row, label in enumerate(row_labels[:n_rows]):
         axes[row, 0].text(
             -0.12, 0.5, label,
             transform=axes[row, 0].transAxes,
@@ -123,6 +143,7 @@ def plot_sequence(args: argparse.Namespace) -> None:
             rotation=90,
         )
 
+    img = img_diff = None
     for col, lead_idx in enumerate(lead_steps):
         valid_time = pd.Timestamp(nowcast_ds.valid_time.values[INIT_IDX, lead_idx])
         title      = valid_time.strftime("%H:%M UTC")
@@ -130,29 +151,68 @@ def plot_sequence(args: argparse.Namespace) -> None:
         nwc_step = nowcast_ds["probabilistic_advection"].isel(
             initialization_time=INIT_IDX, lead_time=lead_idx, ensemble=0
         )
-        obs_step = (
-            obs_ds["sds"]
-            .sel(time=valid_time, method="nearest")
-            .rename({"y": "lat", "x": "lon"})
-        )
+        if bbox is not None:
+            nwc_step = nwc_step.sel(lat=slice(lat_max, lat_min), lon=slice(lon_min, lon_max))
 
-        for row, data in enumerate([nwc_step, obs_step]):
-            ax = axes[row, col]
-            img = data.plot(
-                ax=ax,
-                transform=ccrs.PlateCarree(),
-                add_colorbar=False,
-                vmin=args.vmin, vmax=args.vmax,
-                cmap="inferno",
-            )
-            ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor="grey")
-            ax.add_feature(cfeature.COASTLINE, linewidth=0.7)
+        obs_step = None
+        if obs_ds is not None and valid_time.to_datetime64() <= obs_ds.time.values[-1]:
+            obs_times   = obs_ds.time.values
+            nearest_idx = np.argmin(np.abs(obs_times - valid_time.to_datetime64()))
+            diff = abs(pd.Timestamp(obs_times[nearest_idx]) - valid_time)
+            if diff <= pd.Timedelta("8min"):
+                obs_step = obs_ds["sds"].isel(time=nearest_idx).rename({"y": "lat", "x": "lon"})
+                if bbox is not None:
+                    obs_step = obs_step.sel(lat=slice(lat_max, lat_min), lon=slice(lon_min, lon_max))
+
+        # Difference panel (only defined when both exist and grids align)
+        diff_step = None
+        if show_diff and nwc_step is not None and obs_step is not None:
+            try:
+                diff_step = nwc_step - obs_step.values
+            except Exception:
+                diff_step = None
+
+        panels = [(nwc_step, "inferno", args.vmin, args.vmax),
+                  (obs_step,  "inferno", args.vmin, args.vmax)]
+        if show_diff:
+            abs_max = max(abs(args.vmin), abs(args.vmax)) / 2
+            panels.append((diff_step, "RdBu_r", -abs_max, abs_max))
+
+        for r, (data, cmap, vmin, vmax) in enumerate(panels):
+            ax = axes[r, col]
+            if bbox is not None:
+                ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=ccrs.PlateCarree())
+                ax.autoscale(False)
+            if data is not None:
+                mapped = data.plot(
+                    ax=ax,
+                    transform=ccrs.PlateCarree(),
+                    add_colorbar=False,
+                    vmin=vmin, vmax=vmax,
+                    cmap=cmap,
+                )
+                ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor="grey")
+                ax.add_feature(cfeature.COASTLINE, linewidth=0.7)
+                if r < 2:
+                    img = mapped
+                else:
+                    img_diff = mapped
+            else:
+                ax.set_facecolor("#222222")
+                ax.text(0.5, 0.5, "Not yet\navailable",
+                        transform=ax.transAxes, ha="center", va="center",
+                        fontsize=9, color="white")
             ax.set_title(title, fontsize=9)
             ax.set_xlabel("")
             ax.set_ylabel("")
 
-    fig.colorbar(img, ax=axes, orientation="vertical",
-                 fraction=0.02, pad=0.02, label="GHI (W/m²)")
+    # Colourbars — one for NWC/OBS rows, one for diff row
+    if img is not None:
+        fig.colorbar(img, ax=axes[:2, :], orientation="vertical",
+                     fraction=0.02, pad=0.02, label="GHI (W/m²)")
+    if show_diff and img_diff is not None:
+        fig.colorbar(img_diff, ax=axes[2, :], orientation="vertical",
+                     fraction=0.02, pad=0.02, label="Difference (W/m²)")
     fig.suptitle(
         f"Nowcast vs. Observation  |  init {pd.Timestamp(init_time).strftime('%Y-%m-%d %H:%M UTC')}",
         fontsize=13, fontweight="bold", y=1.01,
@@ -199,6 +259,15 @@ def plot_scores(args: argparse.Namespace) -> None:
     for da in (mae_da, rmse_da):
         da["lead_time"] = pd.to_timedelta(da.lead_time, unit="min")
 
+    # Optional spatial subset before averaging
+    bbox = getattr(args, "bbox", None)
+    if bbox is not None:
+        lon_min, lat_min, lon_max, lat_max = bbox
+        mae_da  = mae_da.sel( lat=slice(lat_max, lat_min), lon=slice(lon_min, lon_max))
+        rmse_da = rmse_da.sel(lat=slice(lat_max, lat_min), lon=slice(lon_min, lon_max))
+        print(f"  Averaging over bbox lon=[{lon_min}, {lon_max}] lat=[{lat_min}, {lat_max}]"
+              f"  ({mae_da.sizes['lat']}×{mae_da.sizes['lon']} grid points)")
+
     mae_by_lead  = mae_da.mean(dim=["lat", "lon"])
     rmse_by_lead = rmse_da.mean(dim=["lat", "lon"])
     lead_hours   = mae_by_lead.lead_time.values / np.timedelta64(1, "h")
@@ -207,13 +276,14 @@ def plot_scores(args: argparse.Namespace) -> None:
     stem  = mae_path.stem          # e.g. mae_20260226_20260227
     parts = stem.split("_")        # ['mae', '20260226', '20260227']
     date_label = f"{parts[1][:4]}-{parts[1][4:6]}-{parts[1][6:]} → {parts[2][:4]}-{parts[2][4:6]}-{parts[2][6:]}"
+    domain_label = f"bbox {bbox}" if bbox is not None else "full domain"
 
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(lead_hours, mae_by_lead.values,  label="MAE",  marker="o", linewidth=2)
     ax.plot(lead_hours, rmse_by_lead.values, label="RMSE", marker="s", linewidth=2)
     ax.set_xlabel("Forecast horizon (hours)")
     ax.set_ylabel("Error (W/m²)")
-    ax.set_title(f"Forecast error vs. lead time  |  {date_label}")
+    ax.set_title(f"Forecast error vs. lead time  |  {date_label}  |  {domain_label}")
     ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
