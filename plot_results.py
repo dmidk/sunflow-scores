@@ -39,7 +39,7 @@ RESULTS_DIR = Path("results")
 
 
 # =============================================================================
-# CLI
+# Argument parsing
 # =============================================================================
 
 def parse_args() -> argparse.Namespace:
@@ -70,6 +70,16 @@ def parse_args() -> argparse.Namespace:
                    help="End date tag of the scores file, e.g. 2026-02-27")
     p.add_argument("--results-dir", default=str(RESULTS_DIR),
                    help="Directory containing MAE/RMSE NetCDF files")
+
+    # --- time-series plot ---
+    p.add_argument("--init-date", default=None,
+                   help="Date for the time-series fan plot, e.g. 2026-03-03")
+    p.add_argument("--point-lat", type=float, default=55.676,
+                   help="Latitude of the point location (default: Copenhagen)")
+    p.add_argument("--point-lon", type=float, default=12.568,
+                   help="Longitude of the point location (default: Copenhagen)")
+    p.add_argument("--point-name", default=None,
+                   help="Label for the point, e.g. 'Copenhagen'")
 
     # --- data dirs ---
     p.add_argument("--nwc-dir", default=str(NWC_DIR))
@@ -124,26 +134,46 @@ def plot_sequence(args: argparse.Namespace) -> None:
         lon_min = lon_max = lat_min = lat_max = None
 
     show_diff = getattr(args, "show_diff", False)
-    n_rows    = 3 if show_diff else 2
-    row_labels = ["Nowcast", "Observation", "Difference (NWC − OBS)"]
+    point_lat = getattr(args, "point_lat", None)
+    point_lon = getattr(args, "point_lon", None)
+    show_point_ts = point_lat is not None and point_lon is not None
+    n_rows = 3 if show_diff else 2
+    if show_point_ts:
+        n_rows += 1
+    row_labels = ["Nowcast", "Observation"]
+    if show_diff:
+        row_labels.append("Difference (NWC − OBS)")
+    if show_point_ts:
+        row_labels.append(f"Time series at ({point_lat:.3f}, {point_lon:.3f})")
 
-    fig, axes = plt.subplots(
-        n_rows, n_steps,
-        figsize=(3.5 * n_steps, 2.7 * n_rows),
-        subplot_kw={"projection": ccrs.PlateCarree()},
-        constrained_layout=True,
-    )
+    # Create map axes (GeoAxes) for map rows only
+    map_rows = n_rows - 1 if show_point_ts else n_rows
+    fig = plt.figure(figsize=(3.5 * n_steps, 2.7 * n_rows), constrained_layout=True)
+    axes = np.empty((n_rows, n_steps), dtype=object)
+    for row in range(map_rows):
+        for col in range(n_steps):
+            axes[row, col] = fig.add_subplot(n_rows, n_steps, row * n_steps + col + 1, projection=ccrs.PlateCarree())
+    # Add standard axes for time series row (centered, half-width)
+    if show_point_ts:
+        for col in range(n_steps):
+            axes[-1, col] = None
+        gs = fig.add_gridspec(n_rows, n_steps)
+        half = n_steps // 2
+        start = n_steps // 4
+        axes[-1, start] = fig.add_subplot(gs[-1, start:start+half])
 
     for row, label in enumerate(row_labels[:n_rows]):
-        axes[row, 0].text(
-            -0.12, 0.5, label,
-            transform=axes[row, 0].transAxes,
-            va="center", ha="right",
-            fontsize=11, fontweight="bold",
-            rotation=90,
-        )
+        if axes[row, 0] is not None and not (show_point_ts and row == n_rows - 1):
+            axes[row, 0].text(
+                -0.12, 0.5, label,
+                transform=axes[row, 0].transAxes,
+                va="center", ha="right",
+                fontsize=11, fontweight="bold",
+                rotation=90,
+            )
 
     img = img_diff = None
+    point_nwc = point_obs = None
     for col, lead_idx in enumerate(lead_steps):
         valid_time = pd.Timestamp(nowcast_ds.valid_time.values[INIT_IDX, lead_idx])
         title      = valid_time.strftime("%H:%M UTC")
@@ -205,6 +235,27 @@ def plot_sequence(args: argparse.Namespace) -> None:
             ax.set_title(title, fontsize=9)
             ax.set_xlabel("")
             ax.set_ylabel("")
+
+    # --- Point time series row (single centered panel spanning half the columns) ---
+    if show_point_ts:
+        ax = axes[-1, start]
+        # Nowcast time series for this init
+        ts_nwc = nowcast_ds["probabilistic_advection"].isel(
+            initialization_time=INIT_IDX, ensemble=0
+        ).sel(lat=point_lat, lon=point_lon, method="nearest")
+        times = pd.to_datetime(nowcast_ds.valid_time.values[INIT_IDX])
+        ax.plot(times, ts_nwc.values, label="Nowcast", color="steelblue", marker="o")
+        # Observation time series (if available)
+        if obs_ds is not None:
+            ts_obs = obs_ds["sds"].sel(y=point_lat, x=point_lon, method="nearest")
+            ax.plot(obs_ds.time.values, ts_obs.values, label="Observation", color="tomato", marker=".")
+        ax.set_title(f"Time series at ({point_lat:.3f}, {point_lon:.3f})")
+        ax.set_xlabel("Time (UTC)")
+        ax.set_ylabel("GHI (W/m²)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(times[0], times[-1])
+        ax.set_ylim(args.vmin, args.vmax)
 
     # Colourbars — one for NWC/OBS rows, one for diff row
     if img is not None:
@@ -289,6 +340,98 @@ def plot_scores(args: argparse.Namespace) -> None:
     plt.tight_layout()
 
     _show_or_save(fig, args, f"scores_{parts[1]}_{parts[2]}.png")
+
+
+# =============================================================================
+# Plot 3 — Point time series: Nowcast fan vs. Observation
+# =============================================================================
+
+def plot_timeseries(args: argparse.Namespace) -> None:
+    """
+    For a single location (lat, lon) plot every nowcast issued on a given day
+    as a thin line (fan), plus the observation dots where available.
+
+    args fields:
+        init_date   – date string, e.g. "2026-03-03"  (all inits that day)
+        point_lat   – target latitude  (nearest grid point used)
+        point_lon   – target longitude
+        point_name  – label for the plot title, e.g. "Copenhagen"
+        vmin, vmax  – y-axis limits
+        nwc_dir, obs_dir, save_dir
+    """
+    if args.init_date is None:
+        raise ValueError("--init-date is required for the time-series plot.")
+
+    date      = pd.Timestamp(args.init_date)
+    day_start = date.normalize()
+    day_end   = day_start + pd.Timedelta("23h45min")
+
+    point_lat  = getattr(args, "point_lat",  55.676)   # Copenhagen
+    point_lon  = getattr(args, "point_lon",  12.568)
+    point_name = getattr(args, "point_name", f"{point_lat:.3f}°N {point_lon:.3f}°E")
+
+    print(f"\nLoading nowcasts for {day_start.date()} ...")
+    nwc_loader = SatelliteNowcastLoader(data_dir=args.nwc_dir)
+    nowcast_ds = nwc_loader.load_data(day_start, day_end).compute()
+
+    # Nearest grid point (lat is descending, lon ascending — method="nearest" handles both)
+    nwc_point = nowcast_ds["probabilistic_advection"].sel(
+        lat=point_lat, lon=point_lon, method="nearest", ensemble=0
+    )
+    actual_lat = float(nwc_point.lat)
+    actual_lon = float(nwc_point.lon)
+    print(f"  Nearest grid point: {actual_lat:.3f}°N, {actual_lon:.3f}°E")
+
+    # Observation: load full day + max lead time beyond midnight
+    obs_start = day_start
+    obs_end   = day_end + pd.Timedelta(nowcast_ds.lead_time.max().values)
+    print(f"Loading observations up to {obs_end} ...")
+    obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir)
+    try:
+        obs_ds = obs_loader.load_data(obs_start, obs_end).compute()
+        obs_point = obs_ds["sds"].sel(y=point_lat, x=point_lon, method="nearest")
+    except ValueError:
+        print("  No observation files found — plotting nowcasts only.")
+        obs_ds    = None
+        obs_point = None
+
+    fig, ax = plt.subplots(figsize=(13, 4))
+    vmin = getattr(args, "vmin", 0)
+    vmax = getattr(args, "vmax", 900)
+
+    # --- nowcast fan: one line per initialization time ---
+    n_inits = nowcast_ds.sizes["initialization_time"]
+    colours = plt.cm.Blues(np.linspace(0.3, 0.9, n_inits))
+
+    for i in range(n_inits):
+        init_time  = pd.Timestamp(nowcast_ds.initialization_time.values[i])
+        valid_times = pd.DatetimeIndex(nowcast_ds.valid_time.values[i])
+        values      = nwc_point.isel(initialization_time=i).values
+        ax.plot(valid_times, values,
+                color=colours[i], linewidth=1.0, alpha=0.7,
+                label=f"NWC {init_time.strftime('%H:%M')}" if i == 0 or i == n_inits - 1 else "_")
+
+    # Invisible proxy for a clean legend entry covering the full fan
+    ax.plot([], [], color="steelblue", linewidth=2, label="Nowcast (all inits)")
+
+    # --- observations ---
+    if obs_point is not None:
+        ax.scatter(pd.DatetimeIndex(obs_ds.time.values), obs_point.values,
+                   color="tomato", s=20, zorder=5, label="Observation")
+
+    ax.set_xlim(day_start, day_end + pd.Timedelta(nowcast_ds.lead_time.max().values))
+    ax.set_ylim(vmin, vmax)
+    ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter("%H:%M"))
+    ax.set_xlabel("Time (UTC)")
+    ax.set_ylabel("GHI (W/m²)")
+    ax.set_title(
+        f"Nowcast fan vs. Observation  |  {point_name}  |  {day_start.strftime('%Y-%m-%d')}"
+    )
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    _show_or_save(fig, args, f"timeseries_{point_name.replace(' ', '_')}_{day_start.strftime('%Y%m%d')}.png")
 
 
 # =============================================================================
