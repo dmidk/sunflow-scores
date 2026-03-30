@@ -24,6 +24,14 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+import sys
+
+project_root = Path(__file__).resolve().parent
+src_path = project_root / "src"
+if str(src_path) not in sys.path:
+    sys.path.insert(0, str(src_path))
+
+
 from sunflow_scores.validator import SatelliteNowcastLoader, SatelliteObservationLoader, ScoreCalculator
 import dask
 dask.config.set(scheduler="threads")
