@@ -161,10 +161,11 @@ class SatelliteObservationLoader:
         start_date = pd.Timestamp(start_date)
         end_date   = pd.Timestamp(end_date)
 
-        all_hours = pd.date_range(start=start_date.floor("h"), end=end_date.ceil("h"), freq="h")
+        # Observations are stored every 15 minutes (NetCDF4_sds_YYYY-MM-DDTHH_MM_SSZ.nc).
+        all_times = pd.date_range(start=start_date.floor("15min"), end=end_date.ceil("15min"), freq="15min")
         files_to_open = sorted({
             str(self.data_dir / f"NetCDF4_sds_{ts.strftime('%Y-%m-%dT%H_%M_%SZ')}.nc")
-            for ts in all_hours
+            for ts in all_times
             if (self.data_dir / f"NetCDF4_sds_{ts.strftime('%Y-%m-%dT%H_%M_%SZ')}.nc").exists()
         })
 

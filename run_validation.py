@@ -114,6 +114,7 @@ def main() -> None:
     obs_end   = nwc_end + pd.Timedelta(nowcast_ds.lead_time.max().values)
     obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir)
     obs_ds = obs_loader.load_data(obs_start, obs_end)
+    print(f"  Loaded obs time range: {obs_ds.time.min().values} to {obs_ds.time.max().values}")
 
     # Determine spatial dims for chunking (lat/lon or y/x).
     obs_chunk = {"time": 1}
