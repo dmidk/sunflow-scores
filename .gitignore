@@ -1,18 +1,24 @@
-# Python & uv virtual environment
-.venv/
+# Python cache
 __pycache__/
-*.py[cod]
-*$py.class
+*.pyc
+*.pyo
+*.pyd
 
-# Jupyter Notebooks
+# Virtual env
+.venv/
+venv/
+
+# Notebook outputs + local workspace
 .ipynb_checkpoints/
+notebooks/results/
+notebooks/*.ipynb
+*.code-workspace
 
-# IDEs (VS Code, PyCharm)
-.vscode/
-.idea/
-
-# Data Files (CRITICAL: Do not upload massive NetCDF files to Git!)
+# Data files
+results/
 *.nc
-*.grib
-*.grb
-*.zarr
+
+# Build/egg
+dist/
+build/
+*.egg-info/
