@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from validator import SatelliteNowcastLoader, SatelliteObservationLoader, ScoreCalculator
+from sunflow_scores.validator import SatelliteNowcastLoader, SatelliteObservationLoader, ScoreCalculator
 import dask
 dask.config.set(scheduler="threads")
 

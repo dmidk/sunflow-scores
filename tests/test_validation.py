@@ -4,10 +4,8 @@ import xarray as xr
 from pathlib import Path
 import pytest
 
-# Make the validator module available for testing
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from validator import ScoreCalculator, SatelliteNowcastLoader, SatelliteObservationLoader
+# Make the package module available for testing
+from sunflow_scores.validator import ScoreCalculator, SatelliteNowcastLoader, SatelliteObservationLoader
 
 @pytest.fixture
 def dummy_data(tmp_path: Path) -> tuple[Path, Path]:

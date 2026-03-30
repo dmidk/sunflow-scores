@@ -24,13 +24,8 @@ test = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = "."
+pythonpath = "src"
 testpaths = "tests"
 
 [tool.setuptools]
-py-modules = [
-    "validator",
-    "run_validation",
-    "plot_results",
-    "run_yearly_validation",
-]
+packages = { find = { where = ["src"] } }
