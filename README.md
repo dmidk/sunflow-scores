@@ -1,5 +1,7 @@
 # 🌦️ sunflow-scores
 
+Note: This repo is currently *under construction*
+
 A Python framework for calculating scores of **solar irradiance (GHI)** nowcasts at the Danish Meteorological Institute (DMI). 
 
 
