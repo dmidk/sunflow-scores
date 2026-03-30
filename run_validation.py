@@ -74,6 +74,12 @@ def main() -> None:
     nwc_start = pd.Timestamp(args.start)
     nwc_end   = pd.Timestamp(args.end)
 
+    # If date-only is given (midnight), interpret as full day.
+    if nwc_start == nwc_start.normalize():
+        nwc_start = nwc_start.normalize()
+    if nwc_end == nwc_end.normalize():
+        nwc_end = nwc_end.normalize() + pd.Timedelta(hours=23, minutes=45)
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,6 +98,9 @@ def main() -> None:
     print("Step 1/4 — Loading nowcasts...")
     nwc_loader = SatelliteNowcastLoader(data_dir=args.nwc_dir)
     nowcast_ds = nwc_loader.load_data(nwc_start, nwc_end)
+    print(f"  Loaded nowcast init range: {nowcast_ds.initialization_time.min().values} to {nowcast_ds.initialization_time.max().values}")
+    print(f"  Loaded nowcast valid_time range: {nowcast_ds.valid_time.min().values} to {nowcast_ds.valid_time.max().values}")
+    nowcast_ds = nowcast_ds.chunk({"initialization_time": 1, "lead_time": 1, "lat": 64, "lon": 64})
     print(f"  {nowcast_ds.sizes['initialization_time']} runs × "
           f"{nowcast_ds.sizes['lead_time']} lead steps loaded "
           f"({time.perf_counter() - t0:.1f}s)\n")
@@ -105,6 +114,18 @@ def main() -> None:
     obs_end   = nwc_end + pd.Timedelta(nowcast_ds.lead_time.max().values)
     obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir)
     obs_ds = obs_loader.load_data(obs_start, obs_end)
+
+    # Determine spatial dims for chunking (lat/lon or y/x).
+    obs_chunk = {"time": 1}
+    if "lat" in obs_ds.dims and "lon" in obs_ds.dims:
+        obs_chunk.update({"lat": 64, "lon": 64})
+    elif "y" in obs_ds.dims and "x" in obs_ds.dims:
+        obs_chunk.update({"y": 64, "x": 64})
+    else:
+        # Fallback: chunk only time
+        pass
+
+    obs_ds = obs_ds.chunk(obs_chunk)
     print(f"  {obs_ds.sizes['time']} observation timesteps loaded "
           f"({time.perf_counter() - t1:.1f}s)\n")
 
@@ -114,15 +135,17 @@ def main() -> None:
     t2 = time.perf_counter()
     print("Step 3/4 — Aligning and computing (this will take time)...")
     scorer = ScoreCalculator(
-        nowcast_ds, 
+        nowcast_ds,
         obs_ds,
         nowcast_ghi_var=args.nowcast_ghi_var,
         obs_ghi_var=args.obs_ghi_var,
         obs_cs_ghi_var=args.obs_cs_ghi_var
     )
     scorer.align_data()
-    # Keep lazy dask graph as long as possible, compute only in save path. 
-    # scorer.aligned_data = scorer.aligned_data.compute()  # removed for better streaming
+
+    # Persist aligned data to avoid repeated graph recompute
+    scorer.aligned_data = scorer.aligned_data.persist()
+
     print(f"  Done ({time.perf_counter() - t2:.1f}s)\n")
 
     # ------------------------------------------------------------------
@@ -169,7 +192,8 @@ def main() -> None:
 
     for name, da in results.items():
         path = output_dir / f"{name}_{date_tag}.nc"
-        _prepare_for_save(da).to_netcdf(path, engine="h5netcdf")
+        print(f"  Writing {name.upper()} to {path}...", flush=True)
+        _prepare_for_save(da).compute().to_netcdf(path, engine="h5netcdf")
         print(f"  {name.upper()} → {path}")
 
     print(f"  ({time.perf_counter() - t3:.1f}s)\n")
