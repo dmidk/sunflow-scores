@@ -25,9 +25,9 @@ import pandas as pd
 import xarray as xr
 
 from validator import SatelliteNowcastLoader, SatelliteObservationLoader, ScoreCalculator
+import dask
+dask.config.set(scheduler="threads")
 
-NWC_DIR = Path("/dmidata/projects/energivejr/nowcasts")
-OBS_DIR = Path("/dmidata/projects/energivejr/satellite_data")
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,17 +43,20 @@ def parse_args() -> argparse.Namespace:
         help="Last nowcast initialization time, e.g. 2026-02-28 23:45",
     )
     parser.add_argument(
-        "--nwc-dir", default=str(NWC_DIR),
-        help=f"Directory containing nowcast files (default: {NWC_DIR})",
+        "--nwc-dir", required=True,
+        help=f"Directory containing nowcast files",
     )
     parser.add_argument(
-        "--obs-dir", default=str(OBS_DIR),
-        help=f"Directory containing observation files (default: {OBS_DIR})",
+        "--obs-dir", required=True,
+        help=f"Directory containing observation files",
     )
     parser.add_argument(
         "--output-dir", default="results",
         help="Directory to write output NetCDF files (default: ./results/)",
     )
+    parser.add_argument("--nowcast_ghi_var", type=str, default="probabilistic_advection", help="Name of the GHI variable in the nowcast files")
+    parser.add_argument("--obs_ghi_var", type=str, default="sds", help="Name of the GHI variable in the observation files")
+    parser.add_argument("--obs_cs_ghi_var", type=str, default="sds_cs", help="Name of the clear-sky GHI variable in the observation files")
     return parser.parse_args()
 
 
@@ -102,9 +105,16 @@ def main() -> None:
     # ------------------------------------------------------------------
     t2 = time.perf_counter()
     print("Step 3/4 — Aligning and computing (this will take time)...")
-    scorer = ScoreCalculator(nowcast_ds, obs_ds)
+    scorer = ScoreCalculator(
+        nowcast_ds, 
+        obs_ds,
+        nowcast_ghi_var=args.nowcast_ghi_var,
+        obs_ghi_var=args.obs_ghi_var,
+        obs_cs_ghi_var=args.obs_cs_ghi_var
+    )
     scorer.align_data()
-    scorer.aligned_data = scorer.aligned_data.compute()
+    # Keep lazy dask graph as long as possible, compute only in save path. 
+    # scorer.aligned_data = scorer.aligned_data.compute()  # removed for better streaming
     print(f"  Done ({time.perf_counter() - t2:.1f}s)\n")
 
     # ------------------------------------------------------------------
@@ -113,30 +123,47 @@ def main() -> None:
     t3 = time.perf_counter()
     print("Step 4/4 — Calculating scores and saving...")
 
-    mae  = scorer.calculate_mae()
-    rmse = scorer.calculate_rmse()
+    kt_data = scorer.calculate_kt()
 
-    mae_path  = output_dir / f"mae_{date_tag}.nc"
-    rmse_path = output_dir / f"rmse_{date_tag}.nc"
+    scores_to_calculate = {
+        "mae": (scorer.aligned_data, False),
+        "rmse": (scorer.aligned_data, False),
+        "mae_kt": (kt_data, False),
+        "rmse_kt": (kt_data, False),
+        "mae_by_init": (scorer.calculate_mae_by_init(), False),
+        "rmse_by_init": (scorer.calculate_rmse_by_init(), False),
+        "mae_kt_by_init": (scorer.calculate_mae_kt_by_init(), False),
+        "rmse_kt_by_init": (scorer.calculate_rmse_kt_by_init(), False),
+    }
+
+    results = {}
+    for name, (data, by_hour) in scores_to_calculate.items():
+        if name in ("mae_by_init", "rmse_by_init", "mae_kt_by_init", "rmse_kt_by_init"):
+            results[name] = data
+        elif name.startswith("mae"):
+            results[name] = scorer.calculate_mae(data, groupby_time_of_day=by_hour)
+        elif name.startswith("rmse"):
+            results[name] = scorer.calculate_rmse(data, groupby_time_of_day=by_hour)
 
     # NetCDF4 cannot store timedelta64 coordinates directly.
     # Convert lead_time to integer minutes; record the unit in an attribute
     # so it can be reconstructed with pd.to_timedelta(da.lead_time, unit="min").
     # Also drop any auxiliary coords (e.g. valid_time) that aren't plain numerics.
     def _prepare_for_save(da: xr.DataArray) -> xr.DataArray:
-        lead_minutes = da.lead_time.values / np.timedelta64(1, "m")
-        da = da.assign_coords(lead_time=lead_minutes.astype("int32"))
-        da = da.assign_attrs({**da.attrs, "lead_time_units": "minutes"})
+        if "lead_time" in da.coords:
+            lead_minutes = da.lead_time.values / np.timedelta64(1, "m")
+            da = da.assign_coords(lead_time=lead_minutes.astype("int32"))
+            da = da.assign_attrs({**da.attrs, "lead_time_units": "minutes"})
         aux_to_drop = [c for c in da.coords if c not in da.dims]
         if aux_to_drop:
             da = da.drop_vars(aux_to_drop)
         return da
 
-    _prepare_for_save(mae).to_netcdf(mae_path, engine="h5netcdf")
-    _prepare_for_save(rmse).to_netcdf(rmse_path, engine="h5netcdf")
+    for name, da in results.items():
+        path = output_dir / f"{name}_{date_tag}.nc"
+        _prepare_for_save(da).to_netcdf(path, engine="h5netcdf")
+        print(f"  {name.upper()} → {path}")
 
-    print(f"  MAE  → {mae_path}")
-    print(f"  RMSE → {rmse_path}")
     print(f"  ({time.perf_counter() - t3:.1f}s)\n")
 
     total = time.perf_counter() - t0

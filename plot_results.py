@@ -33,10 +33,6 @@ import xarray as xr
 
 from validator import SatelliteNowcastLoader, SatelliteObservationLoader
 
-NWC_DIR     = Path("/dmidata/projects/energivejr/nowcasts")
-OBS_DIR     = Path("/dmidata/projects/energivejr/satellite_data")
-RESULTS_DIR = Path("results")
-
 
 # =============================================================================
 # Argument parsing
@@ -68,7 +64,7 @@ def parse_args() -> argparse.Namespace:
                    help="Start date tag of the scores file, e.g. 2026-02-26")
     p.add_argument("--scores-end", default=None,
                    help="End date tag of the scores file, e.g. 2026-02-27")
-    p.add_argument("--results-dir", default=str(RESULTS_DIR),
+    p.add_argument("--results-dir", default="results",
                    help="Directory containing MAE/RMSE NetCDF files")
 
     # --- time-series plot ---
@@ -82,8 +78,8 @@ def parse_args() -> argparse.Namespace:
                    help="Label for the point, e.g. 'Copenhagen'")
 
     # --- data dirs ---
-    p.add_argument("--nwc-dir", default=str(NWC_DIR))
-    p.add_argument("--obs-dir", default=str(OBS_DIR))
+    p.add_argument("--nwc-dir", required=True, help="Directory containing nowcast files")
+    p.add_argument("--obs-dir", required=True, help="Directory containing observation files")
 
     # --- mode switches ---
     p.add_argument("--no-scores",   action="store_true",
@@ -278,68 +274,111 @@ def plot_sequence(args: argparse.Namespace) -> None:
 
 def plot_scores(args: argparse.Namespace) -> None:
     results_dir = Path(args.results_dir)
+    score_vars = ["mae", "rmse", "mae_kt", "rmse_kt", "mae_by_hour", "rmse_by_hour", "mae_kt_by_hour", "rmse_kt_by_hour"]
 
-    # Resolve which files to load
+    # --- 1. Resolve which files to load ---------------------------------------
     if args.scores_start and args.scores_end:
         start_tag = pd.Timestamp(args.scores_start).strftime("%Y%m%d")
         end_tag   = pd.Timestamp(args.scores_end).strftime("%Y%m%d")
-        mae_path  = results_dir / f"mae_{start_tag}_{end_tag}.nc"
-        rmse_path = results_dir / f"rmse_{start_tag}_{end_tag}.nc"
-        if not mae_path.exists() or not rmse_path.exists():
-            raise FileNotFoundError(
-                f"Could not find {mae_path} or {rmse_path}.\n"
-                f"Run: uv run python run_validation.py "
-                f"--start {args.scores_start} --end {args.scores_end}"
-            )
+        score_paths = {var: results_dir / f"{var}_{start_tag}_{end_tag}.nc" for var in score_vars}
+        for var, path in score_paths.items():
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Could not find {path}.\n"
+                    f"Run: uv run python run_validation.py "
+                    f"--start {args.scores_start} --end {args.scores_end}"
+                )
     else:
-        mae_files  = sorted(results_dir.glob("mae_*.nc"))
-        rmse_files = sorted(results_dir.glob("rmse_*.nc"))
-        if not mae_files or not rmse_files:
-            raise FileNotFoundError(
-                f"No score files found in {results_dir.resolve()}. "
-                "Run run_validation.py first, or pass --scores-start / --scores-end."
-            )
-        mae_path  = mae_files[-1]   # use most recent
-        rmse_path = rmse_files[-1]
+        score_paths = {}
+        for var in score_vars:
+            files = sorted(results_dir.glob(f"{var}_*.nc"))
+            if not files:
+                raise FileNotFoundError(
+                    f"No score files found for '{var}' in {results_dir.resolve()}. "
+                    "Run run_validation.py first, or pass --scores-start / --scores-end."
+                )
+            score_paths[var] = files[-1]
 
-    print(f"\nLoading scores from {mae_path.name} / {rmse_path.name} ...")
-    mae_da  = xr.open_dataarray(mae_path,  engine="h5netcdf")
-    rmse_da = xr.open_dataarray(rmse_path, engine="h5netcdf")
+    print(f"\nLoading scores from {results_dir}...")
+    scores = {var: xr.open_dataarray(path, engine="h5netcdf") for var, path in score_paths.items()}
 
-    # Restore lead_time from integer minutes
-    for da in (mae_da, rmse_da):
-        da["lead_time"] = pd.to_timedelta(da.lead_time, unit="min")
+    # Restore lead_time from integer minutes to timedelta
+    for da in scores.values():
+        if "lead_time" in da.coords:
+            da["lead_time"] = pd.to_timedelta(da.lead_time, unit="min")
 
-    # Optional spatial subset before averaging
+    # --- 2. Optional spatial subset before averaging --------------------------
     bbox = getattr(args, "bbox", None)
     if bbox is not None:
         lon_min, lat_min, lon_max, lat_max = bbox
-        mae_da  = mae_da.sel( lat=slice(lat_max, lat_min), lon=slice(lon_min, lon_max))
-        rmse_da = rmse_da.sel(lat=slice(lat_max, lat_min), lon=slice(lon_min, lon_max))
-        print(f"  Averaging over bbox lon=[{lon_min}, {lon_max}] lat=[{lat_min}, {lat_max}]"
-              f"  ({mae_da.sizes['lat']}×{mae_da.sizes['lon']} grid points)")
+        for var, da in scores.items():
+            if "lat" in da.coords and "lon" in da.coords:
+                scores[var] = da.sel(lat=slice(lat_max, lat_min), lon=slice(lon_min, lon_max))
+        print(f"  Averaging over bbox lon=[{lon_min}, {lon_max}] lat=[{lat_min}, {lat_max}]")
 
-    mae_by_lead  = mae_da.mean(dim=["lat", "lon"])
-    rmse_by_lead = rmse_da.mean(dim=["lat", "lon"])
-    lead_hours   = mae_by_lead.lead_time.values / np.timedelta64(1, "h")
+    # --- 3. Prepare data for plotting -----------------------------------------
+    # Average over spatial dimensions
+    scores_agg = {var: da.mean(dim=["lat", "lon"]) for var, da in scores.items()}
 
-    # Derive a readable date range from the filename
-    stem  = mae_path.stem          # e.g. mae_20260226_20260227
-    parts = stem.split("_")        # ['mae', '20260226', '20260227']
+    # Get a common date label and domain label for titles
+    stem  = score_paths["mae"].stem
+    parts = stem.split("_")
     date_label = f"{parts[1][:4]}-{parts[1][4:6]}-{parts[1][6:]} → {parts[2][:4]}-{parts[2][4:6]}-{parts[2][6:]}"
     domain_label = f"bbox {bbox}" if bbox is not None else "full domain"
+    file_tag = f"{parts[1]}_{parts[2]}"
 
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(lead_hours, mae_by_lead.values,  label="MAE",  marker="o", linewidth=2)
-    ax.plot(lead_hours, rmse_by_lead.values, label="RMSE", marker="s", linewidth=2)
-    ax.set_xlabel("Forecast horizon (hours)")
-    ax.set_ylabel("Error (W/m²)")
-    ax.set_title(f"Forecast error vs. lead time  |  {date_label}  |  {domain_label}")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    # --- 4. Generate plots ----------------------------------------------------
+    # Plot 1: GHI error vs lead time
+    fig1, ax1 = plt.subplots(figsize=(10, 4))
+    lead_hours = scores_agg["mae"].lead_time.values / np.timedelta64(1, "h")
+    ax1.plot(lead_hours, scores_agg["mae"].values,  label="MAE",  marker="o", linewidth=2)
+    ax1.plot(lead_hours, scores_agg["rmse"].values, label="RMSE", marker="s", linewidth=2)
+    ax1.set_xlabel("Forecast horizon (hours)")
+    ax1.set_ylabel("Error (W/m²)")
+    ax1.set_title(f"GHI Forecast Error vs. Lead Time  |  {date_label}  |  {domain_label}")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
     plt.tight_layout()
+    _show_or_save(fig1, args, f"scores_ghi_{file_tag}.png")
 
-    _show_or_save(fig, args, f"scores_{parts[1]}_{parts[2]}.png")
+    # Plot 2: Kt error vs lead time
+    fig2, ax2 = plt.subplots(figsize=(10, 4))
+    lead_hours_kt = scores_agg["mae_kt"].lead_time.values / np.timedelta64(1, "h")
+    ax2.plot(lead_hours_kt, scores_agg["mae_kt"].values,  label="MAE (kt)",  marker="o", linewidth=2)
+    ax2.plot(lead_hours_kt, scores_agg["rmse_kt"].values, label="RMSE (kt)", marker="s", linewidth=2)
+    ax2.set_xlabel("Forecast horizon (hours)")
+    ax2.set_ylabel("Error (unitless clear-sky index)")
+    ax2.set_title(f"Clear-Sky Index (kt) Forecast Error vs. Lead Time  |  {date_label}  |  {domain_label}")
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    plt.tight_layout()
+    _show_or_save(fig2, args, f"scores_kt_{file_tag}.png")
+
+    # Plot 3: Diurnal GHI error
+    fig3, ax3 = plt.subplots(figsize=(10, 4))
+    ax3.plot(scores_agg["mae_by_hour"].hour, scores_agg["mae_by_hour"].values,  label="MAE",  marker="o", linewidth=2)
+    ax3.plot(scores_agg["rmse_by_hour"].hour, scores_agg["rmse_by_hour"].values, label="RMSE", marker="s", linewidth=2)
+    ax3.set_xlabel("Hour of day (UTC)")
+    ax3.set_ylabel("Error (W/m²)")
+    ax3.set_title(f"Diurnal Cycle of GHI Forecast Error  |  {date_label}  |  {domain_label}")
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xticks(range(0, 25, 2))
+    plt.tight_layout()
+    _show_or_save(fig3, args, f"scores_ghi_diurnal_{file_tag}.png")
+
+    # Plot 4: Diurnal Kt error
+    fig4, ax4 = plt.subplots(figsize=(10, 4))
+    ax4.plot(scores_agg["mae_kt_by_hour"].hour, scores_agg["mae_kt_by_hour"].values,  label="MAE (kt)",  marker="o", linewidth=2)
+    ax4.plot(scores_agg["rmse_kt_by_hour"].hour, scores_agg["rmse_kt_by_hour"].values, label="RMSE (kt)", marker="s", linewidth=2)
+    ax4.set_xlabel("Hour of day (UTC)")
+    ax4.set_ylabel("Error (unitless clear-sky index)")
+    ax4.set_title(f"Diurnal Cycle of Clear-Sky Index (kt) Forecast Error  |  {date_label}  |  {domain_label}")
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    ax4.set_xticks(range(0, 25, 2))
+    plt.tight_layout()
+    _show_or_save(fig4, args, f"scores_kt_diurnal_{file_tag}.png")
 
 
 # =============================================================================

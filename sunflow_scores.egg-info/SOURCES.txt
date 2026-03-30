@@ -1,0 +1,12 @@
+README.md
+plot_results.py
+pyproject.toml
+run_validation.py
+run_yearly_validation.py
+validator.py
+sunflow_scores.egg-info/PKG-INFO
+sunflow_scores.egg-info/SOURCES.txt
+sunflow_scores.egg-info/dependency_links.txt
+sunflow_scores.egg-info/requires.txt
+sunflow_scores.egg-info/top_level.txt
+tests/test_validation.py

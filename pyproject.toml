@@ -1,7 +1,7 @@
 [project]
-name = "nowcastingvalidation"
+name = "sunflow-scores"
 version = "0.1.0"
-description = "Add your description here"
+description = ""
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -16,4 +16,21 @@ dependencies = [
     "pandas>=3.0.1",
     "scores>=1.3.0",
     "xarray>=2026.2.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.4.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = "."
+testpaths = "tests"
+
+[tool.setuptools]
+py-modules = [
+    "validator",
+    "run_validation",
+    "plot_results",
+    "run_yearly_validation",
 ]
