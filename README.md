@@ -1,6 +1,4 @@
-# 🌦️ sunflow-scores
-
-Note: This repo is currently *under construction*
+# 🌦️ sunflow-scores (currently *under construction*)
 
 A Python framework for calculating scores of **solar irradiance (GHI)** nowcasts at the Danish Meteorological Institute (DMI). 
 
@@ -9,7 +7,6 @@ A Python framework for calculating scores of **solar irradiance (GHI)** nowcasts
 ## ✨ Key Features
 * **Solar Nowcasting Validation:** Evaluates 15-minute temporal resolution satellite-based predictions against satellite observations.
 * **Robust Meteorological Metrics:** Powered by the `scores` package, calculating continuous metrics (RMSE, MAE) and spatial verification metrics like the Fractions Skill Score (FSS).
-* **Highly Scalable:** Built on `xarray` and `dask` to process gigabytes of NetCDF files out-of-core without crashing system memory.
 * **Dependency Management:** Uses `uv` for reproducible virtual environments.
 
 
@@ -38,73 +35,143 @@ What this does: uv will read the pyproject.toml file, automatically download the
 
 
 ## 🚀 Running the Validation
-To run the validation, use the `run_validation.py` script. You must provide the start and end dates for the validation period, and the directories containing the nowcast and observation data.
+The main validator is `run_validation.py`. It takes a start date, an end date, the nowcast directory, and the observation directory.
 
-### Basic Usage
-Here is a basic example of how to run the validation for a specific date range if you are using MSG-cpp data and the nowcasts produced at DMI:
+### One day
+Run a single validation day like this:
 ```bash
-python run_validation.py \
-    --start 2025-01-01 \
-    --end 2025-01-31 \
-    --nwc-dir /path/to/your/nowcasts \
-    --obs-dir /path/to/your/observations \
-    --output-dir results/
+uv run python run_validation.py \
+  --start 2025-01-02 \
+  --end 2025-01-02 \
+  --nwc-dir /path/to/sunflow_output/202501 \
+  --obs-dir /path/to/satellite_GHI/202501 \
+  --output-dir results
 ```
-This will process all nowcasts between January 1st and January 31st, 2025, and save the calculated scores in the `results/` directory.
 
-### Command-Line Arguments
-Here are all the available options:
+This writes a daily CSV such as `results/scores_20250102.csv`.
 
+### A whole month
+Because the inputs are organized in `YYYYMM` folders and the outputs are daily CSVs, the usual workflow is to loop over the days in a month.
+
+Example for January 2025:
+```bash
+for day in $(seq -w 1 31); do
+  uv run python run_validation.py \
+    --start 2025-01-${day} \
+    --end 2025-01-${day} \
+    --nwc-dir /path/to/sunflow_output/202501 \
+    --obs-dir /path/to/satellite_GHI/202501 \
+    --output-dir results
+done
+```
+
+
+### Custom variable names
+If your files use different variable names, pass them explicitly:
+```bash
+uv run python run_validation.py \
+  --start 2025-01-02 \
+  --end 2025-01-02 \
+  --nwc-dir /path/to/nowcasts \
+  --obs-dir /path/to/observations \
+  --nowcast_ghi_var GHI_nowcast \
+  --obs_ghi_var GHI_observation \
+ 
+```
+
+### Command-line arguments
 | Argument | Description | Required | Default |
 |---|---|---|---|
-| `--start` | The first nowcast initialization time (e.g., `2023-01-01`). | Yes | |
-| `--end` | The last nowcast initialization time (e.g., `2023-01-31 23:45`). | Yes | |
+| `--start` | First nowcast initialization time. | Yes | |
+| `--end` | Last nowcast initialization time. | Yes | |
 | `--nwc-dir` | Directory containing the nowcast NetCDF files. | Yes | |
 | `--obs-dir` | Directory containing the observation NetCDF files. | Yes | |
-| `--output-dir` | Directory where the output score files will be saved. | No | `results` |
-| `--nowcast_ghi_var` | The name of the GHI variable in the nowcast files. | No | `probabilistic_advection` |
-| `--obs_ghi_var` | The name of the GHI variable in the observation files. | No | `sds` |
-| `--obs_cs_ghi_var` | The name of the clear-sky GHI variable in the observation files. | No | `sds_cs` |
+| `--output-dir` | Directory where the output score files are written. | No | `results` |
+| `--nowcast_ghi_var` | GHI variable in the nowcast files. | No | `probabilistic_advection` |
+| `--obs_ghi_var` | GHI variable in the observation files. | No | `sds` |
+| `--obs_cs_ghi_var` | Clear-sky GHI variable in the observation files. | No | `sds_cs` |
 
+### What the validation writes
+The current pipeline writes one CSV per day:
+`scores_YYYYMMDD.csv`
 
-### Advanced Usage (with custom variable names)
-If your datasets use different variable names for GHI than the default for MSG-cpp data, you can specify them on the command line:
+Each file contains by-init scores and a `lead_time_minutes` column, which is what the plotting tools consume.
+
+## 📊 Plotting the results
+
+### Daily plots
+Use `plot_daily_scores.py` for one daily CSV or for a directory of daily CSVs.
+
+Single day heatmap:
 ```bash
-python run_validation.py \
-    --start 2023-01-01 \
-    --end 2023-01-31 \
-    --nwc-dir /path/to/nowcasts \
-    --obs-dir /path/to/observations \
-    --nowcast_ghi_var GHI_nowcast \
-    --obs_ghi_var GHI_observation \
-    --obs_cs_ghi_var GHI_clearsky
+uv run python plot_daily_scores.py \
+  --input results/scores_20250102.csv \
+  --output-dir results/plots
 ```
 
-### ✅ Yearly batch processing
-If you have month-by-month nowcast data organized by `YYYYMM` folders, use:
+Monthly summary over all daily CSVs in a directory:
 ```bash
-python run_yearly_validation.py \
-  --year 2025 \
-  --nwc-base-dir /path/to/monthly-nowcasts \
-  --obs-dir /path/to/observations \
-  --output-dir results \
-  --nowcast-ghi-var GHI \
-  --obs-ghi-var GHI \
-  --obs-cs-ghi-var CLEARSKY_GHI
+uv run python plot_daily_scores.py \
+  --input results \
+  --summary \
+  --output-dir results/plots
 ```
 
-This will call `run_validation.py` for each month and produce results files like:
-`results/mae_20250101_20250131.nc`, `results/rmse_20250101_20250131.nc`, etc.
+Monthly average heatmap by initialization time and lead time:
+```bash
+uv run python plot_daily_scores.py \
+  --input results \
+  --average-heatmap \
+  --output-dir results/plots
+```
+
+You can also choose a metric with `--metric mae`, `--metric rmse`, or `--metric both`.
+
+### Monthly plots
+Use `plot_monthly_heatmaps.py` to write one summary plot and one averaged heatmap for each month found in a directory of daily CSVs.
+
+Plot both summary and averaged heatmaps for both metrics:
+```bash
+uv run python plot_monthly_heatmaps.py \
+  --input results \
+  --summary \
+  --heatmap \
+  --metric both \
+  --output-dir results/monthly_plots
+```
+
+Only summary MAE plots:
+```bash
+uv run python plot_monthly_heatmaps.py \
+  --input results \
+  --summary \
+  --metric mae \
+  --output-dir results/monthly_plots
+```
+
+Only averaged RMSE heatmaps:
+```bash
+uv run python plot_monthly_heatmaps.py \
+  --input results \
+  --heatmap \
+  --metric rmse \
+  --output-dir results/monthly_plots
+```
+
+The monthly script does not require every day of the month to be present. It will plot whatever daily CSVs exist for that month, which is useful when some days were skipped because there was no data.
 
 ## 📂 Project Structure
+The core library code lives under `src/sunflow_scores/`.
 ```text
-NowcastingValidation/
-├── validator.py              # Core library: SatelliteNowcastLoader,
-│                             #   SatelliteObservationLoader, ScoreCalculator
-├── run_validation.py         # Batch Validation Script: loads data, computes MAE/RMSE,
-│                             #   writes results to results/ as NetCDF
-├── plot_results.py           # Plots nowcast vs. observation sequence and
-│                             #   MAE/RMSE vs. lead time (terminal or notebook)
+sunflow-scores/
+├── src/
+│   └── sunflow_scores/
+│       ├── __init__.py
+│       ├── validator.py      # Core library: SatelliteNowcastLoader,
+│                             # SatelliteObservationLoader, ScoreCalculator
+├── run_validation.py         # Daily validation script: writes one scores_YYYYMMDD.csv per run
+├── plot_daily_scores.py      # Plot one day or a directory of daily CSVs
+├── plot_monthly_heatmaps.py  # Plot monthly summaries / averaged heatmaps from daily CSVs
 ├── pyproject.toml            # uv dependency definitions
 ├── uv.lock                   # Strictly locked dependency hashes
 ├── .gitignore                # Excludes data files and results
