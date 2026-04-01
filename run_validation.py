@@ -23,7 +23,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
-
 import sys
 
 project_root = Path(__file__).resolve().parent
@@ -83,7 +82,7 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    date_tag = f"{nwc_start.strftime('%Y%m%d')}_{nwc_end.strftime('%Y%m%d')}"
+    date_tag = nwc_start.strftime('%Y%m%d')
 
     print(f"\n{'='*60}")
     print(f"  Validation run")
@@ -106,12 +105,15 @@ def main() -> None:
           f"({time.perf_counter() - t0:.1f}s)\n")
 
     # ------------------------------------------------------------------
-    # 2. Load observations
+    # 2. Load observations (only matching nowcast valid_time range)
     # ------------------------------------------------------------------
     t1 = time.perf_counter()
     print("Step 2/4 — Loading observations...")
-    obs_start = nwc_start
-    obs_end   = nwc_end + pd.Timedelta(nowcast_ds.lead_time.max().values)
+    obs_start = pd.Timestamp(nowcast_ds.valid_time.min().values)
+    obs_end = pd.Timestamp(nowcast_ds.valid_time.max().values)
+    # Keep a tiny safety margin for rounding issues
+    obs_start -= pd.Timedelta(minutes=15)
+    obs_end += pd.Timedelta(minutes=15)
     obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir)
     obs_ds = obs_loader.load_data(obs_start, obs_end)
     print(f"  Loaded obs time range: {obs_ds.time.min().values} to {obs_ds.time.max().values}")
@@ -144,8 +146,9 @@ def main() -> None:
     )
     scorer.align_data()
 
-    # Persist aligned data to avoid repeated graph recompute
-    scorer.aligned_data = scorer.aligned_data.persist()
+    # Persisting aligned data can be expensive for large datasets.
+    # Instead keep it lazy and compute only when saving.
+    # scorer.aligned_data = scorer.aligned_data.persist()
 
     print(f"  Done ({time.perf_counter() - t2:.1f}s)\n")
 
@@ -155,48 +158,27 @@ def main() -> None:
     t3 = time.perf_counter()
     print("Step 4/4 — Calculating scores and saving...")
 
-    kt_data = scorer.calculate_kt()
+    # Compute the 2D by-init outputs we actually need:
+    # one row per (initialization_time, lead_time) pair.
+    mae_by_init = scorer.calculate_mae_by_init().compute()
+    rmse_by_init = scorer.calculate_rmse_by_init().compute()
 
-    scores_to_calculate = {
-        "mae": (scorer.aligned_data, False),
-        "rmse": (scorer.aligned_data, False),
-        "mae_kt": (kt_data, False),
-        "rmse_kt": (kt_data, False),
-        "mae_by_init": (scorer.calculate_mae_by_init(), False),
-        "rmse_by_init": (scorer.calculate_rmse_by_init(), False),
-        "mae_kt_by_init": (scorer.calculate_mae_kt_by_init(), False),
-        "rmse_kt_by_init": (scorer.calculate_rmse_kt_by_init(), False),
-    }
+    scores_ds = xr.Dataset({
+        "mae_by_init": mae_by_init,
+        "rmse_by_init": rmse_by_init,
+    })
 
-    results = {}
-    for name, (data, by_hour) in scores_to_calculate.items():
-        if name in ("mae_by_init", "rmse_by_init", "mae_kt_by_init", "rmse_kt_by_init"):
-            results[name] = data
-        elif name.startswith("mae"):
-            results[name] = scorer.calculate_mae(data, groupby_time_of_day=by_hour)
-        elif name.startswith("rmse"):
-            results[name] = scorer.calculate_rmse(data, groupby_time_of_day=by_hour)
+    # Save as a tidy CSV table so downstream plotting can pivot or line-plot easily.
+    out_path = Path(args.output_dir) / f"scores_{date_tag}.csv"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # NetCDF4 cannot store timedelta64 coordinates directly.
-    # Convert lead_time to integer minutes; record the unit in an attribute
-    # so it can be reconstructed with pd.to_timedelta(da.lead_time, unit="min").
-    # Also drop any auxiliary coords (e.g. valid_time) that aren't plain numerics.
-    def _prepare_for_save(da: xr.DataArray) -> xr.DataArray:
-        if "lead_time" in da.coords:
-            lead_minutes = da.lead_time.values / np.timedelta64(1, "m")
-            da = da.assign_coords(lead_time=lead_minutes.astype("int32"))
-            da = da.assign_attrs({**da.attrs, "lead_time_units": "minutes"})
-        aux_to_drop = [c for c in da.coords if c not in da.dims]
-        if aux_to_drop:
-            da = da.drop_vars(aux_to_drop)
-        return da
+    print(f"  Writing by-init CSV to {out_path}")
+    df = scores_ds.to_dataframe().reset_index()
+    df["lead_time_minutes"] = (df["lead_time"] / np.timedelta64(1, "m")).astype("int32")
+    df = df.drop(columns=["lead_time"])
+    df.to_csv(out_path, index=False)
 
-    for name, da in results.items():
-        path = output_dir / f"{name}_{date_tag}.nc"
-        print(f"  Writing {name.upper()} to {path}...", flush=True)
-        _prepare_for_save(da).compute().to_netcdf(path, engine="h5netcdf")
-        print(f"  {name.upper()} → {path}")
-
+    print(f"  ALL METRICS → {out_path}")
     print(f"  ({time.perf_counter() - t3:.1f}s)\n")
 
     total = time.perf_counter() - t0

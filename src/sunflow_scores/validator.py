@@ -199,7 +199,7 @@ class ScoreCalculator:
         self.aligned_data = None
         self.kt_data = None
 
-    def align_data(self, chunk_size: int = 100) -> xr.Dataset:
+    def align_data(self, chunk_size: int = 50) -> xr.Dataset:
         """
         Match each nowcast (initialization_time, lead_time) step to its
         corresponding observation by valid_time. This version processes data in chunks
@@ -210,18 +210,30 @@ class ScoreCalculator:
         (initialization_time, lead_time, lat, lon).
         """
         nwc = self.nowcast_data[self.nowcast_ghi_var].isel(ensemble=0)
-        
         num_inits = len(self.nowcast_data.initialization_time)
         aligned_chunks = []
+
+        # Pre-select the minimal observation time window once for all chunks.
+        all_valid_times = self.nowcast_data.valid_time.values.ravel()
+        valid_min = pd.Timestamp(all_valid_times.min()) - pd.Timedelta(minutes=15)
+        valid_max = pd.Timestamp(all_valid_times.max()) + pd.Timedelta(minutes=15)
+
+        obs_source = self.observation_data.sel(time=slice(valid_min, valid_max))
+        if "y" in obs_source.dims and "x" in obs_source.dims:
+            obs_source = obs_source.rename({"y": "lat", "x": "lon"})
+
+        # Pre-index obs to all needed valid time points with one nearest pass.
+        target_times = np.unique(all_valid_times)
+        obs_source = obs_source.reindex(time=target_times, method="nearest")
 
         for i in range(0, num_inits, chunk_size):
             chunk_slice = slice(i, i + chunk_size)
             nowcast_chunk = nwc.isel(initialization_time=chunk_slice)
             valid_time_chunk = self.nowcast_data.valid_time.isel(initialization_time=chunk_slice)
-            
+
             flat_valid_times = valid_time_chunk.values.ravel()
-            
-            obs_chunk = self.observation_data.sel(time=flat_valid_times, method="nearest").rename({"y": "lat", "x": "lon"})
+
+            obs_chunk = obs_source.sel(time=flat_valid_times)
             obs_flat = obs_chunk[self.obs_ghi_var]
             cs_flat = obs_chunk[self.obs_cs_ghi_var]
 
@@ -231,6 +243,7 @@ class ScoreCalculator:
             n_lat  = nowcast_chunk.sizes["lat"]
             n_lon  = nowcast_chunk.sizes["lon"]
 
+            # Avoid repeated numpy copies where possible, but still reshape to 4D result.
             obs_da_chunk = xr.DataArray(
                 obs_flat.values.reshape(n_init_chunk, n_lead, n_lat, n_lon),
                 dims=["initialization_time", "lead_time", "lat", "lon"],
@@ -273,24 +286,35 @@ class ScoreCalculator:
         Calculates the clear-sky index (kt) for nowcasts and observations.
         The result is stored in self.kt_data.
         """
+        raise RuntimeError("kt calculation disabled for speed")
+    
+        '''
         if self.aligned_data is None:
             raise RuntimeError("Call .align_data() first.")
 
+        # Rechunk for manageable parallel execution
+        aligned = self.aligned_data.chunk({"initialization_time": 10, "lead_time": 5, "lat": 64, "lon": 64})
+
         # Avoid division by zero or near-zero clearsky values
-        clearsky = self.aligned_data["clearsky"].where(self.aligned_data["clearsky"] > 1e-6)
-        
-        kt_nowcast = (self.aligned_data["nowcast"] / clearsky).fillna(0)
-        kt_observation = (self.aligned_data["observation"] / clearsky).fillna(0)
+        clearsky = aligned["clearsky"].where(aligned["clearsky"] > 1e-6)
+
+        kt_nowcast = (aligned["nowcast"] / clearsky).fillna(0)
+        kt_observation = (aligned["observation"] / clearsky).fillna(0)
+
+        # Keep data mostly lazy until final write
+        kt_nowcast = kt_nowcast.chunk({"initialization_time": 10, "lead_time": 5, "lat": 64, "lon": 64})
+        kt_observation = kt_observation.chunk({"initialization_time": 10, "lead_time": 5, "lat": 64, "lon": 64})
 
         self.kt_data = xr.Dataset({
             "nowcast": kt_nowcast,
             "observation": kt_observation,
         })
         self.kt_data = self.kt_data.assign_coords(
-            valid_time=(("initialization_time", "lead_time"), self.aligned_data.valid_time.data)
+            valid_time=(("initialization_time", "lead_time"), aligned.valid_time.data)
         )
         print(f"  Clear-sky index (kt) calculation complete.")
         return self.kt_data
+        '''
 
     def calculate_mae(self, data: xr.Dataset, groupby_time_of_day=False) -> xr.DataArray:
         """
