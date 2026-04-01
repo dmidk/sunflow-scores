@@ -90,13 +90,23 @@ def main() -> None:
     print(f"  Output   : {output_dir}/")
     print(f"{'='*60}\n")
 
+    def _skip_day(message: str) -> None:
+        print(f"  SKIP: {message}")
+        print("  Finished in 0.0 min")
+        print(f"{'='*60}\n")
+        return
+
     # ------------------------------------------------------------------
     # 1. Load nowcasts
     # ------------------------------------------------------------------
     t0 = time.perf_counter()
     print("Step 1/4 — Loading nowcasts...")
     nwc_loader = SatelliteNowcastLoader(data_dir=args.nwc_dir)
-    nowcast_ds = nwc_loader.load_data(nwc_start, nwc_end)
+    try:
+        nowcast_ds = nwc_loader.load_data(nwc_start, nwc_end)
+    except ValueError as exc:
+        _skip_day(str(exc))
+        return
     print(f"  Loaded nowcast init range: {nowcast_ds.initialization_time.min().values} to {nowcast_ds.initialization_time.max().values}")
     print(f"  Loaded nowcast valid_time range: {nowcast_ds.valid_time.min().values} to {nowcast_ds.valid_time.max().values}")
     nowcast_ds = nowcast_ds.chunk({"initialization_time": 1, "lead_time": 1, "lat": 64, "lon": 64})
@@ -115,7 +125,11 @@ def main() -> None:
     obs_start -= pd.Timedelta(minutes=15)
     obs_end += pd.Timedelta(minutes=15)
     obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir)
-    obs_ds = obs_loader.load_data(obs_start, obs_end)
+    try:
+        obs_ds = obs_loader.load_data(obs_start, obs_end)
+    except ValueError as exc:
+        _skip_day(str(exc))
+        return
     print(f"  Loaded obs time range: {obs_ds.time.min().values} to {obs_ds.time.max().values}")
 
     # Determine spatial dims for chunking (lat/lon or y/x).
