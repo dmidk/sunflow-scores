@@ -22,3 +22,6 @@ results/
 dist/
 build/
 *.egg-info/
+
+# IDE
+.idea/
