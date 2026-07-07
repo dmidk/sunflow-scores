@@ -340,11 +340,6 @@ def main() -> None:
     input_path = Path(args.input)
     output_dir = Path(args.output_dir)
 
-    if input_path.is_file():
-        out_path = plot_day_heatmap(input_path, output_dir)
-        print(f"Wrote {out_path}")
-        return
-
     if input_path.is_dir() and args.average:
         out_path = plot_leadtime_average(input_path, output_dir)
         print(f"Wrote {out_path}")
@@ -362,6 +357,11 @@ def main() -> None:
 
     if input_path.is_dir() and args.summary:
         out_path = plot_summary(input_path, output_dir)
+        print(f"Wrote {out_path}")
+        return
+
+    if input_path.is_file():
+        out_path = plot_day_heatmap(input_path, output_dir)
         print(f"Wrote {out_path}")
         return
 
