@@ -128,7 +128,7 @@ class SatelliteNowcastLoader:
         start_date = pd.Timestamp(start_date)
         end_date   = pd.Timestamp(end_date)
 
-        all_files = list(self.data_dir.glob("SolarNowcast_*.nc"))
+        all_files = list(self.data_dir.rglob("SolarNowcast_*.nc"))
         files_to_open = _filter_files_by_time(
             all_files, _parse_nowcast_timestamp, start_date, end_date
         )
@@ -210,7 +210,7 @@ class SatelliteObservationLoader:
         start_date = pd.Timestamp(start_date)
         end_date   = pd.Timestamp(end_date)
 
-        all_files = list(self.data_dir.glob("NetCDF4_sds_*.nc"))
+        all_files = list(self.data_dir.rglob("NetCDF4_sds_*.nc"))
         files_to_open = _filter_files_by_time(
             all_files,
             _parse_observation_timestamp,
