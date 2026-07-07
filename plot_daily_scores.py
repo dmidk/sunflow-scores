@@ -15,7 +15,13 @@ import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import pandas as pd
+
+
+def _heatmap_norm(vmax: float = 120) -> mcolors.TwoSlopeNorm:
+    vcenter = min(60, vmax * 0.5)
+    return mcolors.TwoSlopeNorm(vmin=0, vcenter=vcenter, vmax=vmax)
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,10 +85,27 @@ def plot_day_heatmap(csv_path: Path, output_dir: Path) -> Path:
         aggfunc="mean",
     ).sort_index()
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), constrained_layout=True)
+    # Drop rows where all values are NaN (nighttime init times with no solar data).
+    pivot_mae  = pivot_mae.dropna(how="all")
+    pivot_rmse = pivot_rmse.dropna(how="all")
+    # Align both pivots to the same set of rows after dropping.
+    shared_index = pivot_mae.index.intersection(pivot_rmse.index)
+    pivot_mae  = pivot_mae.loc[shared_index]
+    pivot_rmse = pivot_rmse.loc[shared_index]
+
+    # Dynamic colour scale based on the actual data range.
+    vmax = float(
+        max(
+            pivot_mae.values[~pd.isna(pivot_mae.values)].max() if pivot_mae.notna().any().any() else 120,
+            pivot_rmse.values[~pd.isna(pivot_rmse.values)].max() if pivot_rmse.notna().any().any() else 120,
+        )
+    )
+    vmax = max(vmax, 1.0)  # guard against all-zero data
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 8), constrained_layout=True)
 
     for ax, pivot, title, cmap in [
-        (axes[0], pivot_mae, "MAE by init time", "RdYlGn_r"),
+        (axes[0], pivot_mae,  "MAE by init time",  "RdYlGn_r"),
         (axes[1], pivot_rmse, "RMSE by init time", "RdYlGn_r"),
     ]:
         im = ax.imshow(
@@ -91,14 +114,24 @@ def plot_day_heatmap(csv_path: Path, output_dir: Path) -> Path:
             origin="lower",
             interpolation="nearest",
             cmap=cmap,
+            norm=_heatmap_norm(vmax),
         )
         ax.set_title(title)
         ax.set_xlabel("Lead time (minutes)")
         ax.set_ylabel("Initialization time")
-        ax.set_xticks(range(len(pivot.columns)))
-        ax.set_xticklabels([int(v) for v in pivot.columns], rotation=45, ha="right")
-        ax.set_yticks(range(len(pivot.index)))
-        ax.set_yticklabels([pd.Timestamp(v).strftime("%H:%M") for v in pivot.index])
+
+        # X-axis: tick every 30 minutes (every other column at 15-min spacing).
+        x_cols = list(pivot.columns)
+        x_tick_indices = [i for i, v in enumerate(x_cols) if int(v) % 30 == 0]
+        ax.set_xticks(x_tick_indices)
+        ax.set_xticklabels([int(x_cols[i]) for i in x_tick_indices], rotation=45, ha="right")
+
+        # Y-axis: tick every hour (every 4th row at 15-min spacing).
+        y_labels = list(pivot.index)
+        y_tick_indices = [i for i, v in enumerate(y_labels) if pd.Timestamp(v).minute == 0]
+        ax.set_yticks(y_tick_indices)
+        ax.set_yticklabels([pd.Timestamp(y_labels[i]).strftime("%H:%M") for i in y_tick_indices])
+
         fig.colorbar(im, ax=ax, shrink=0.85)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -139,6 +172,7 @@ def plot_summary(csv_dir: Path, output_dir: Path) -> Path:
             origin="lower",
             interpolation="nearest",
             cmap=cmap,
+            norm=_heatmap_norm(),
         )
         ax.set_title(title)
         ax.set_xlabel("Lead time (minutes)")
@@ -248,26 +282,50 @@ def plot_average_heatmap(csv_dir: Path, output_dir: Path) -> Path:
     pivot_mae = average.pivot(index="init_time", columns="lead_time_minutes", values="mae_by_init")
     pivot_rmse = average.pivot(index="init_time", columns="lead_time_minutes", values="rmse_by_init")
 
-    fig, axes = plt.subplots(2, 1, figsize=(14, 14), constrained_layout=True)
+    # Drop all-NaN rows (nighttime) and align pivots.
+    pivot_mae  = pivot_mae.dropna(how="all").sort_index()
+    pivot_rmse = pivot_rmse.dropna(how="all").sort_index()
+    shared_index = pivot_mae.index.intersection(pivot_rmse.index)
+    pivot_mae  = pivot_mae.loc[shared_index]
+    pivot_rmse = pivot_rmse.loc[shared_index]
+
+    # Dynamic colour scale.
+    import numpy as np
+    vmax = float(max(
+        pivot_mae.values[~np.isnan(pivot_mae.values)].max() if pivot_mae.notna().any().any() else 120,
+        pivot_rmse.values[~np.isnan(pivot_rmse.values)].max() if pivot_rmse.notna().any().any() else 120,
+    ))
+    vmax = max(vmax, 1.0)
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10), constrained_layout=True)
     for ax, pivot, title, cmap in [
-        (axes[0], pivot_mae, "Average MAE by initialization time and lead time", "RdYlGn_r"),
+        (axes[0], pivot_mae,  "Average MAE by initialization time and lead time",  "RdYlGn_r"),
         (axes[1], pivot_rmse, "Average RMSE by initialization time and lead time", "RdYlGn_r"),
     ]:
-        pivot = pivot.sort_index()
         im = ax.imshow(
             pivot.values,
             aspect="auto",
             origin="lower",
             interpolation="nearest",
             cmap=cmap,
+            norm=_heatmap_norm(vmax),
         )
         ax.set_title(title)
         ax.set_xlabel("Lead time (minutes)")
         ax.set_ylabel("Initialization time")
-        ax.set_xticks(range(len(pivot.columns)))
-        ax.set_xticklabels([int(v) for v in pivot.columns], rotation=45, ha="right")
-        ax.set_yticks(range(len(pivot.index)))
-        ax.set_yticklabels(pivot.index)
+
+        # X-axis: every 30 min.
+        x_cols = list(pivot.columns)
+        x_tick_indices = [i for i, v in enumerate(x_cols) if int(v) % 30 == 0]
+        ax.set_xticks(x_tick_indices)
+        ax.set_xticklabels([int(x_cols[i]) for i in x_tick_indices], rotation=45, ha="right")
+
+        # Y-axis: every hour (HH:00 labels).
+        y_labels = list(pivot.index)
+        y_tick_indices = [i for i, v in enumerate(y_labels) if v.endswith(":00")]
+        ax.set_yticks(y_tick_indices)
+        ax.set_yticklabels([y_labels[i] for i in y_tick_indices])
+
         fig.colorbar(im, ax=ax, shrink=0.85)
 
     output_dir.mkdir(parents=True, exist_ok=True)
