@@ -4,19 +4,74 @@ Satellite Nowcast Score Framework
 Classes:
     SatelliteNowcastLoader     – loads nowcast NetCDF files into xarray
     SatelliteObservationLoader – loads satellite observation NetCDF files
-    ScoreCalculator            – aligns the two datasets and computes MAE / RMSE
+    GroundObservationLoader    – loads ground station (pyranometer) CSV/NetCDF files
+    ScoreCalculator            – aligns satellite nowcast/obs and computes MAE / RMSE
+    GroundScoreCalculator      – point-based validation against station observations
 
 File naming conventions:
     Nowcasts:     SolarNowcast_YYYYMMDDHHMM.nc
     Observations: NetCDF4_sds_YYYY-MM-DDTHH_MM_SSZ.nc
+
+Alignment modes (ScoreCalculator.align_data):
+    "fast"    – exact-time same-grid, no reindex, no loop, fast
+    "general" – chunked loop with nearest-time reindex, tolerates grid mismatch
+    "auto"    – tries fast first, falls back to general on failure
 """
 
-import xarray as xr
-import pandas as pd
-import numpy as np
-import scores.continuous
-from pathlib import Path
+from __future__ import annotations
+
 import argparse
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import scores.continuous
+import xarray as xr
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+def _parse_nowcast_timestamp(path: Path) -> pd.Timestamp | None:
+    """Return the initialization time encoded in a nowcast filename, or None."""
+    name = path.stem
+    if not name.startswith("SolarNowcast_"):
+        return None
+    raw = name.replace("SolarNowcast_", "")
+    try:
+        return pd.to_datetime(raw, format="%Y%m%d%H%M")
+    except ValueError:
+        return None
+
+
+def _parse_observation_timestamp(path: Path) -> pd.Timestamp | None:
+    """Return the timestamp encoded in a satellite observation filename, or None."""
+    name = path.stem
+    if not name.startswith("NetCDF4_sds_"):
+        return None
+    raw = name.replace("NetCDF4_sds_", "")
+    try:
+        return pd.to_datetime(raw, format="%Y-%m-%dT%H_%M_%SZ")
+    except ValueError:
+        return None
+
+
+def _filter_files_by_time(
+    files: list[Path],
+    parser,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> list[Path]:
+    """Return sorted subset of *files* whose parsed timestamps fall within [start, end]."""
+    selected: list[Path] = []
+    for path in files:
+        ts = parser(path)
+        if ts is None:
+            continue
+        if start_date <= ts <= end_date:
+            selected.append(path)
+    return sorted(selected)
 
 
 # =============================================================================
@@ -40,10 +95,14 @@ class SatelliteNowcastLoader:
           - adds 'initialization_time' as a new scalar dim for stacking
           - stores valid_time as a 2D auxiliary coordinate for later reference
         """
-        fname = Path(ds.encoding["source"]).name
-        initialization_time = pd.to_datetime(
-            fname.split("_")[1].replace(".nc", ""), format="%Y%m%d%H%M"
-        )
+        source = Path(ds.encoding["source"])
+        initialization_time = _parse_nowcast_timestamp(source)
+        if initialization_time is None:
+            # Fallback to old inline parse for any non-standard filename
+            fname = source.name
+            initialization_time = pd.to_datetime(
+                fname.split("_")[1].replace(".nc", ""), format="%Y%m%d%H%M"
+            )
 
         valid_times = ds["time"].values
         lead_times  = valid_times - initialization_time.to_datetime64()
@@ -60,60 +119,48 @@ class SatelliteNowcastLoader:
         """
         Load all nowcast files with initialization_time in [start_date, end_date].
 
+        Uses a glob + timestamp-filter approach (faster than date_range iteration
+        over large directories). Falls back with an informative error if no files
+        are found.
+
         Returns a lazy Dataset with dims (initialization_time, lead_time, lat, lon).
         """
         start_date = pd.Timestamp(start_date)
         end_date   = pd.Timestamp(end_date)
 
-        def _find_files(start_dt, end_dt):
-            return [
-                str(self.data_dir / f"SolarNowcast_{ts.strftime('%Y%m%d%H%M')}.nc")
-                for ts in pd.date_range(start=start_dt, end=end_dt, freq="15min")
-                if (self.data_dir / f"SolarNowcast_{ts.strftime('%Y%m%d%H%M')}.nc").exists()
-            ]
-
-        files_to_open = _find_files(start_date, end_date)
-
-        # Allow provided end to be slightly beyond available data (e.g. 00:00 boundary).
-        if not files_to_open and end_date > start_date:
-            candidate_end = end_date
-            while candidate_end > start_date:
-                candidate_end -= pd.Timedelta(minutes=15)
-                files_to_open = _find_files(start_date, candidate_end)
-                if files_to_open:
-                    print(
-                        f"  WARNING: no nowcast file found at end={end_date}. "
-                        f"Using end={candidate_end} instead ({len(files_to_open)} files)."
-                    )
-                    end_date = candidate_end
-                    break
+        all_files = list(self.data_dir.glob("SolarNowcast_*.nc"))
+        files_to_open = _filter_files_by_time(
+            all_files, _parse_nowcast_timestamp, start_date, end_date
+        )
 
         if not files_to_open:
-            existing_files = sorted(self.data_dir.glob("SolarNowcast_*.nc"))
-            if existing_files:
-                available_times = [
-                    pd.to_datetime(f.name.split("_")[1].replace(".nc", ""), format="%Y%m%d%H%M")
-                    for f in existing_files
-                ]
-                earliest = min(available_times)
-                latest = max(available_times)
-                print(f"  WARNING: no nowcast files in requested interval.")
-                print(f"  Available data ranges from {earliest} to {latest}.")
-                # Clip requested range
-                adjusted_start = max(start_date, earliest)
-                adjusted_end = min(end_date, latest)
-                if adjusted_start > adjusted_end:
-                    raise ValueError(
-                        f"No nowcast files found between {start_date} and {end_date}. "
-                        f"Available range: {earliest} to {latest}."
-                    )
-                files_to_open = _find_files(adjusted_start, adjusted_end)
-                if files_to_open:
-                    print(
-                        f"  Using adjusted nowcast range {adjusted_start} to {adjusted_end} "
-                        f"({len(files_to_open)} files)."
-                    )
-                    start_date, end_date = adjusted_start, adjusted_end
+            if not all_files:
+                raise ValueError(f"No nowcast files found in {self.data_dir}")
+            timestamps = [
+                ts for ts in (_parse_nowcast_timestamp(p) for p in all_files)
+                if ts is not None
+            ]
+            if not timestamps:
+                raise ValueError(f"No parseable nowcast files found in {self.data_dir}")
+            earliest, latest = min(timestamps), max(timestamps)
+            print(f"  WARNING: no nowcast files in requested interval.")
+            print(f"  Available data ranges from {earliest} to {latest}.")
+            # Clip to available range and try again
+            adjusted_start = max(start_date, earliest)
+            adjusted_end   = min(end_date, latest)
+            if adjusted_start > adjusted_end:
+                raise ValueError(
+                    f"No nowcast files found between {start_date} and {end_date}. "
+                    f"Available range: {earliest} to {latest}."
+                )
+            files_to_open = _filter_files_by_time(
+                all_files, _parse_nowcast_timestamp, adjusted_start, adjusted_end
+            )
+            if files_to_open:
+                print(
+                    f"  Using adjusted nowcast range {adjusted_start} to {adjusted_end} "
+                    f"({len(files_to_open)} files)."
+                )
 
         if not files_to_open:
             raise ValueError(f"No nowcast files found between {start_date} and {end_date}.")
@@ -121,15 +168,15 @@ class SatelliteNowcastLoader:
         print(f"  Found {len(files_to_open)} nowcast files from {start_date} to {end_date}.")
 
         return xr.open_mfdataset(
-            files_to_open,
+            [str(p) for p in files_to_open],
             combine="nested",
             concat_dim="initialization_time",
             preprocess=self._preprocess_nowcast,
             engine="h5netcdf",
             parallel=True,
             chunks={
-                "initialization_time": 4,
-                "lead_time": 25,
+                "initialization_time": 8,
+                "lead_time": 32,
                 "lat": 128,
                 "lon": 128,
             },
@@ -137,7 +184,7 @@ class SatelliteNowcastLoader:
 
 
 # =============================================================================
-# 2. OBSERVATION LOADER
+# 2. SATELLITE OBSERVATION LOADER
 # =============================================================================
 
 class SatelliteObservationLoader:
@@ -147,9 +194,11 @@ class SatelliteObservationLoader:
         self.data_dir = Path(data_dir)
 
     def _preprocess_observation(self, ds: xr.Dataset) -> xr.Dataset:
-        """Drop the 'crs' scalar variable, which conflicts when concatenating files."""
+        """Drop the 'crs' scalar variable and normalise spatial dim names."""
         if "crs" in ds:
             ds = ds.drop_vars("crs")
+        if "y" in ds.dims and "x" in ds.dims:
+            ds = ds.rename({"y": "lat", "x": "lon"})
         return ds
 
     def load_data(self, start_date, end_date) -> xr.Dataset:
@@ -161,59 +210,305 @@ class SatelliteObservationLoader:
         start_date = pd.Timestamp(start_date)
         end_date   = pd.Timestamp(end_date)
 
-        # Observations are stored every 15 minutes (NetCDF4_sds_YYYY-MM-DDTHH_MM_SSZ.nc).
-        all_times = pd.date_range(start=start_date.floor("15min"), end=end_date.ceil("15min"), freq="15min")
-        files_to_open = sorted({
-            str(self.data_dir / f"NetCDF4_sds_{ts.strftime('%Y-%m-%dT%H_%M_%SZ')}.nc")
-            for ts in all_times
-            if (self.data_dir / f"NetCDF4_sds_{ts.strftime('%Y-%m-%dT%H_%M_%SZ')}.nc").exists()
-        })
+        all_files = list(self.data_dir.glob("NetCDF4_sds_*.nc"))
+        files_to_open = _filter_files_by_time(
+            all_files,
+            _parse_observation_timestamp,
+            start_date.floor("15min"),
+            end_date.ceil("15min"),
+        )
 
         if not files_to_open:
-            raise ValueError(f"No observation files found between {start_date} and {end_date}.")
+            if not all_files:
+                raise ValueError(f"No observation files found in {self.data_dir}")
+            timestamps = [
+                ts for ts in (_parse_observation_timestamp(p) for p in all_files)
+                if ts is not None
+            ]
+            if not timestamps:
+                raise ValueError(f"No parseable observation files found in {self.data_dir}")
+            raise ValueError(
+                f"No observation files found in requested interval "
+                f"{start_date} to {end_date}. Available range: "
+                f"{min(timestamps)} to {max(timestamps)}."
+            )
 
         print(f"  Loading {len(files_to_open)} observation files from {start_date.date()} to {end_date.date()}")
 
         ds = xr.open_mfdataset(
-            files_to_open,
+            [str(p) for p in files_to_open],
             combine="by_coords",
             preprocess=self._preprocess_observation,
             engine="h5netcdf",
-            parallel=True,            chunks={"time": 96, "lat": 128, "lon": 128},        )
+            parallel=True,
+            chunks={"time": 256, "lat": 128, "lon": 128},
+        )
         return ds.sel(time=slice(start_date, end_date)).sortby("time")
 
 
 # =============================================================================
-# 3. SCORE CALCULATOR
+# 3. GROUND OBSERVATION LOADER
+# =============================================================================
+
+class GroundObservationLoader:
+    """
+    Loads point-based ground station observations (pyranometers / AWS) and
+    returns them as an xarray Dataset with dims (time, station_id).
+
+    Expected input formats:
+      - CSV   : columns [time, station_id, ghi, cs_ghi, lat, lon]
+                'time' must be parseable by pandas; one row per (time, station).
+      - NetCDF: dims (time, station_id) with variables ghi, cs_ghi and
+                scalar coordinates lat/lon per station.
+
+    The loader auto-detects the format from the file extension.
+
+    Parameters
+    ----------
+    data_path : str
+        Path to a single CSV/NetCDF file, or a directory of CSV files.
+    ghi_var : str
+        Name of the GHI column/variable (default 'ghi').
+    cs_ghi_var : str
+        Name of the clear-sky GHI column/variable (default 'cs_ghi').
+    station_col : str
+        Name of the station identifier column (default 'station_id').
+    lat_col : str
+        Name of the latitude column (default 'lat').
+    lon_col : str
+        Name of the longitude column (default 'lon').
+    """
+
+    def __init__(
+        self,
+        data_path: str,
+        ghi_var: str = "ghi",
+        cs_ghi_var: str = "cs_ghi",
+        station_col: str = "station_id",
+        lat_col: str = "lat",
+        lon_col: str = "lon",
+    ):
+        self.data_path  = Path(data_path)
+        self.ghi_var    = ghi_var
+        self.cs_ghi_var = cs_ghi_var
+        self.station_col = station_col
+        self.lat_col    = lat_col
+        self.lon_col    = lon_col
+
+    def _load_csv(self, path: Path, start_date: pd.Timestamp, end_date: pd.Timestamp) -> xr.Dataset:
+        """Load one or more CSV files and pivot to (time, station_id) Dataset."""
+        if path.is_dir():
+            frames = [pd.read_csv(f, parse_dates=["time"]) for f in sorted(path.glob("*.csv"))]
+            if not frames:
+                raise ValueError(f"No CSV files found in {path}")
+            df = pd.concat(frames, ignore_index=True)
+        else:
+            df = pd.read_csv(path, parse_dates=["time"])
+
+        df = df[(df["time"] >= start_date) & (df["time"] <= end_date)]
+        if df.empty:
+            raise ValueError(f"No ground observations in [{start_date}, {end_date}].")
+
+        # Extract per-station lat/lon metadata before pivoting
+        station_meta = (
+            df.groupby(self.station_col)[[self.lat_col, self.lon_col]]
+            .first()
+        )
+
+        # Pivot GHI
+        ghi_pivot = (
+            df.pivot_table(index="time", columns=self.station_col, values=self.ghi_var)
+            .sort_index()
+        )
+        # Pivot clear-sky GHI
+        cs_pivot = (
+            df.pivot_table(index="time", columns=self.station_col, values=self.cs_ghi_var)
+            .sort_index()
+        )
+
+        stations = ghi_pivot.columns.tolist()
+        times    = pd.DatetimeIndex(ghi_pivot.index)
+
+        ds = xr.Dataset(
+            {
+                self.ghi_var:    xr.DataArray(ghi_pivot.values,  dims=("time", "station_id")),
+                self.cs_ghi_var: xr.DataArray(cs_pivot.values,   dims=("time", "station_id")),
+                "lat":           xr.DataArray(station_meta.loc[stations, self.lat_col].values, dims="station_id"),
+                "lon":           xr.DataArray(station_meta.loc[stations, self.lon_col].values, dims="station_id"),
+            },
+            coords={
+                "time":       times,
+                "station_id": stations,
+            },
+        )
+        print(f"  Loaded {len(stations)} stations, {len(times)} time steps from {path}")
+        return ds
+
+    def _load_netcdf(self, path: Path, start_date: pd.Timestamp, end_date: pd.Timestamp) -> xr.Dataset:
+        """Load a NetCDF ground-observation file."""
+        ds = xr.open_dataset(str(path), engine="h5netcdf")
+        ds = ds.sel(time=slice(start_date, end_date)).sortby("time")
+        if ds.sizes["time"] == 0:
+            raise ValueError(f"No ground observations in [{start_date}, {end_date}] in {path}.")
+        n_stations = ds.sizes.get("station_id", "?")
+        print(f"  Loaded {n_stations} stations from {path}")
+        return ds
+
+    def load_data(self, start_date, end_date) -> xr.Dataset:
+        """
+        Load ground observations covering [start_date, end_date].
+
+        Returns an xr.Dataset with dims (time, station_id) and variables
+        ghi_var, cs_ghi_var, plus coordinates lat/lon per station.
+        """
+        start_date = pd.Timestamp(start_date)
+        end_date   = pd.Timestamp(end_date)
+
+        path = self.data_path
+        if path.is_dir() or path.suffix.lower() == ".csv":
+            return self._load_csv(path, start_date, end_date)
+        elif path.suffix.lower() in (".nc", ".nc4", ".netcdf"):
+            return self._load_netcdf(path, start_date, end_date)
+        else:
+            # Try CSV first, then NetCDF
+            try:
+                return self._load_csv(path, start_date, end_date)
+            except Exception:
+                return self._load_netcdf(path, start_date, end_date)
+
+
+# =============================================================================
+# 4. SATELLITE SCORE CALCULATOR
 # =============================================================================
 
 class ScoreCalculator:
-    """Aligns nowcast and observation datasets and computes validation scores."""
+    """
+    Aligns nowcast and satellite-observation datasets and computes validation scores.
 
-    def __init__(self, nowcast_data: xr.Dataset, observation_data: xr.Dataset, nowcast_ghi_var: str, obs_ghi_var: str, obs_cs_ghi_var: str):
-        self.nowcast_data = nowcast_data
+    Parameters
+    ----------
+    nowcast_data, observation_data : xr.Dataset
+    nowcast_ghi_var, obs_ghi_var, obs_cs_ghi_var : str
+    """
+
+    def __init__(
+        self,
+        nowcast_data: xr.Dataset,
+        observation_data: xr.Dataset,
+        nowcast_ghi_var: str,
+        obs_ghi_var: str,
+        obs_cs_ghi_var: str,
+    ):
+        self.nowcast_data     = nowcast_data
         self.observation_data = observation_data
-        self.nowcast_ghi_var = nowcast_ghi_var
-        self.obs_ghi_var = obs_ghi_var
-        self.obs_cs_ghi_var = obs_cs_ghi_var
-        self.aligned_data = None
-        self.kt_data = None
+        self.nowcast_ghi_var  = nowcast_ghi_var
+        self.obs_ghi_var      = obs_ghi_var
+        self.obs_cs_ghi_var   = obs_cs_ghi_var
+        self.aligned_data: xr.Dataset | None = None
+        self.kt_data: xr.Dataset | None = None
 
-    def align_data(self, chunk_size: int = 50) -> xr.Dataset:
-        """
-        Match each nowcast (initialization_time, lead_time) step to its
-        corresponding observation by valid_time. This version processes data in chunks
-        to avoid loading everything into memory at once.
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-        The result is stored in self.aligned_data as a Dataset with variables
-        'nowcast', 'observation', and 'clearsky', all with dims
-        (initialization_time, lead_time, lat, lon).
+    def _get_nowcast_var(self) -> xr.DataArray:
+        nwc = self.nowcast_data[self.nowcast_ghi_var]
+        if "ensemble" in nwc.dims:
+            nwc = nwc.isel(ensemble=0, drop=True)
+        return nwc
+
+    def _assert_same_grid(self, nowcast: xr.DataArray, obs: xr.Dataset) -> None:
+        """Raise ValueError if spatial grids differ (used by fast path)."""
+        for dim in ("lat", "lon"):
+            if dim not in nowcast.dims or dim not in obs.dims:
+                raise ValueError(
+                    f"Expected '{dim}' dimension in both nowcast and observation data"
+                )
+            if nowcast.sizes[dim] != obs.sizes[dim]:
+                raise ValueError(
+                    f"Grid mismatch on '{dim}': nowcast={nowcast.sizes[dim]}, "
+                    f"obs={obs.sizes[dim]}"
+                )
+            if not np.array_equal(np.asarray(nowcast[dim].values), np.asarray(obs[dim].values)):
+                raise ValueError(
+                    f"Coordinate mismatch on '{dim}'; fast same-grid mode requires exact match"
+                )
+
+    # ------------------------------------------------------------------
+    # Fast alignment path (exact-time, same-grid)
+    # ------------------------------------------------------------------
+
+    def _align_fast(self) -> xr.Dataset:
         """
-        nwc = self.nowcast_data[self.nowcast_ghi_var].isel(ensemble=0)
+        Single-pass exact-time alignment assuming identical spatial grids.
+
+        Raises ValueError if grids don't match or observation timestamps are missing.
+        """
+        nwc = self._get_nowcast_var()
+        obs = self.observation_data
+
+        self._assert_same_grid(nwc, obs)
+
+        valid_time = self.nowcast_data["valid_time"]
+        flat_valid_times = np.asarray(valid_time.values).reshape(-1)
+
+        obs_time_values = np.asarray(obs["time"].values)
+        missing_times = np.setdiff1d(
+            np.unique(flat_valid_times), np.unique(obs_time_values)
+        )
+        if missing_times.size > 0:
+            raise ValueError(
+                f"Exact-time alignment failed: {missing_times.size} nowcast valid times "
+                f"have no matching observation. First missing: {missing_times[0]}"
+            )
+
+        selected = obs.sel(time=xr.DataArray(flat_valid_times, dims=("sample",)))
+
+        n_init = nwc.sizes["initialization_time"]
+        n_lead = nwc.sizes["lead_time"]
+        n_lat  = nwc.sizes["lat"]
+        n_lon  = nwc.sizes["lon"]
+
+        obs_data = selected[self.obs_ghi_var].data.reshape((n_init, n_lead, n_lat, n_lon))
+        cs_data  = selected[self.obs_cs_ghi_var].data.reshape((n_init, n_lead, n_lat, n_lon))
+
+        coords = {
+            "initialization_time": nwc.initialization_time,
+            "lead_time": nwc.lead_time,
+            "lat": nwc.lat,
+            "lon": nwc.lon,
+        }
+        dims = ("initialization_time", "lead_time", "lat", "lon")
+
+        obs_aligned = xr.DataArray(obs_data, dims=dims, coords=coords, name="observation")
+        cs_aligned  = xr.DataArray(cs_data,  dims=dims, coords=coords, name="clearsky")
+
+        # Enforce a shared chunk layout to prevent Dask chunk-splitting blowups.
+        lead_chunk = int(nwc.sizes["lead_time"])
+        chunk_spec = {"initialization_time": 8, "lead_time": lead_chunk, "lat": 128, "lon": 128}
+        nwc         = nwc.chunk(chunk_spec)
+        obs_aligned = obs_aligned.chunk(chunk_spec)
+        cs_aligned  = cs_aligned.chunk(chunk_spec)
+
+        ds = xr.Dataset({"nowcast": nwc, "observation": obs_aligned, "clearsky": cs_aligned})
+        ds = ds.assign_coords(valid_time=(("initialization_time", "lead_time"), valid_time.data))
+        print("  Data alignment complete (fast same-grid mode).")
+        return ds
+
+    # ------------------------------------------------------------------
+    # General alignment path (chunked loop, nearest-time reindex)
+    # ------------------------------------------------------------------
+
+    def _align_general(self, chunk_size: int = 50) -> xr.Dataset:
+        """
+        Chunked loop alignment with nearest-time reindex.
+
+        Tolerates minor time offsets and grid differences (y/x renamed to lat/lon).
+        """
+        nwc = self._get_nowcast_var()
         num_inits = len(self.nowcast_data.initialization_time)
         aligned_chunks = []
 
-        # Pre-select the minimal observation time window once for all chunks.
         all_valid_times = self.nowcast_data.valid_time.values.ravel()
         valid_min = pd.Timestamp(all_valid_times.min()) - pd.Timedelta(minutes=15)
         valid_max = pd.Timestamp(all_valid_times.max()) + pd.Timedelta(minutes=15)
@@ -222,111 +517,119 @@ class ScoreCalculator:
         if "y" in obs_source.dims and "x" in obs_source.dims:
             obs_source = obs_source.rename({"y": "lat", "x": "lon"})
 
-        # Pre-index obs to all needed valid time points with one nearest pass.
         target_times = np.unique(all_valid_times)
         obs_source = obs_source.reindex(time=target_times, method="nearest")
 
         for i in range(0, num_inits, chunk_size):
             chunk_slice = slice(i, i + chunk_size)
-            nowcast_chunk = nwc.isel(initialization_time=chunk_slice)
+            nowcast_chunk    = nwc.isel(initialization_time=chunk_slice)
             valid_time_chunk = self.nowcast_data.valid_time.isel(initialization_time=chunk_slice)
 
             flat_valid_times = valid_time_chunk.values.ravel()
-
             obs_chunk = obs_source.sel(time=flat_valid_times)
-            obs_flat = obs_chunk[self.obs_ghi_var]
-            cs_flat = obs_chunk[self.obs_cs_ghi_var]
-
+            obs_flat  = obs_chunk[self.obs_ghi_var]
+            cs_flat   = obs_chunk[self.obs_cs_ghi_var]
 
             n_init_chunk = nowcast_chunk.sizes["initialization_time"]
             n_lead = nowcast_chunk.sizes["lead_time"]
             n_lat  = nowcast_chunk.sizes["lat"]
             n_lon  = nowcast_chunk.sizes["lon"]
 
-            # Avoid repeated numpy copies where possible, but still reshape to 4D result.
+            coords = {
+                "initialization_time": nowcast_chunk.initialization_time,
+                "lead_time":           nowcast_chunk.lead_time,
+                "lat":                 nowcast_chunk.lat,
+                "lon":                 nowcast_chunk.lon,
+            }
+            dims = ["initialization_time", "lead_time", "lat", "lon"]
+
             obs_da_chunk = xr.DataArray(
                 obs_flat.values.reshape(n_init_chunk, n_lead, n_lat, n_lon),
-                dims=["initialization_time", "lead_time", "lat", "lon"],
-                coords={
-                    "initialization_time": nowcast_chunk.initialization_time,
-                    "lead_time":           nowcast_chunk.lead_time,
-                    "lat":                 nowcast_chunk.lat,
-                    "lon":                 nowcast_chunk.lon,
-                },
+                dims=dims, coords=coords,
             )
             cs_da_chunk = xr.DataArray(
                 cs_flat.values.reshape(n_init_chunk, n_lead, n_lat, n_lon),
-                dims=["initialization_time", "lead_time", "lat", "lon"],
-                coords={
-                    "initialization_time": nowcast_chunk.initialization_time,
-                    "lead_time":           nowcast_chunk.lead_time,
-                    "lat":                 nowcast_chunk.lat,
-                    "lon":                 nowcast_chunk.lon,
-                },
+                dims=dims, coords=coords,
             )
-            
-            aligned_chunk = xr.Dataset({
-                "nowcast": nowcast_chunk, 
+
+            aligned_chunks.append(xr.Dataset({
+                "nowcast": nowcast_chunk,
                 "observation": obs_da_chunk,
                 "clearsky": cs_da_chunk,
-            })
-            aligned_chunks.append(aligned_chunk)
-            print(f"  Processed chunk {i//chunk_size + 1}/{(num_inits + chunk_size - 1)//chunk_size}")
+            }))
+            print(f"  Processed chunk {i // chunk_size + 1}/{(num_inits + chunk_size - 1) // chunk_size}")
 
-        self.aligned_data = xr.concat(aligned_chunks, dim="initialization_time")
-        # Add valid_time as a coordinate to the aligned data
-        self.aligned_data = self.aligned_data.assign_coords(
+        aligned = xr.concat(aligned_chunks, dim="initialization_time")
+        aligned = aligned.assign_coords(
             valid_time=(("initialization_time", "lead_time"), self.nowcast_data.valid_time.data)
         )
-        print(f"  Data alignment complete.")
+        print("  Data alignment complete (general mode).")
+        return aligned
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def align_data(self, mode: str = "auto", chunk_size: int = 50) -> xr.Dataset:
+        """
+        Align nowcast and observation data, storing the result in self.aligned_data.
+
+        Parameters
+        ----------
+        mode : {"fast", "general", "auto"}
+            "fast"    – exact-time same-grid, no reindex, fastest.
+            "general" – chunked loop with nearest-time reindex.
+            "auto"    – tries fast first, falls back to general on any ValueError.
+        chunk_size : int
+            Chunk size for the general path (ignored in fast mode).
+        """
+        if mode == "fast":
+            self.aligned_data = self._align_fast()
+        elif mode == "general":
+            self.aligned_data = self._align_general(chunk_size=chunk_size)
+        elif mode == "auto":
+            try:
+                self.aligned_data = self._align_fast()
+            except ValueError as exc:
+                print(f"  Fast alignment failed ({exc}); falling back to general mode.")
+                self.aligned_data = self._align_general(chunk_size=chunk_size)
+        else:
+            raise ValueError(f"Unknown alignment mode '{mode}'. Choose 'fast', 'general', or 'auto'.")
         return self.aligned_data
 
     def calculate_kt(self) -> xr.Dataset:
         """
-        Calculates the clear-sky index (kt) for nowcasts and observations.
-        The result is stored in self.kt_data.
+        Calculate the clear-sky index (kt) for nowcasts and observations.
+        Stored in self.kt_data.
         """
-        raise RuntimeError("kt calculation disabled for speed")
-    
-        '''
         if self.aligned_data is None:
             raise RuntimeError("Call .align_data() first.")
 
-        # Rechunk for manageable parallel execution
-        aligned = self.aligned_data.chunk({"initialization_time": 10, "lead_time": 5, "lat": 64, "lon": 64})
-
-        # Avoid division by zero or near-zero clearsky values
+        aligned = self.aligned_data.chunk(
+            {"initialization_time": 10, "lead_time": 5, "lat": 64, "lon": 64}
+        )
         clearsky = aligned["clearsky"].where(aligned["clearsky"] > 1e-6)
 
-        kt_nowcast = (aligned["nowcast"] / clearsky).fillna(0)
-        kt_observation = (aligned["observation"] / clearsky).fillna(0)
+        kt_nowcast     = (aligned["nowcast"]      / clearsky).fillna(0)
+        kt_observation = (aligned["observation"]  / clearsky).fillna(0)
 
-        # Keep data mostly lazy until final write
-        kt_nowcast = kt_nowcast.chunk({"initialization_time": 10, "lead_time": 5, "lat": 64, "lon": 64})
-        kt_observation = kt_observation.chunk({"initialization_time": 10, "lead_time": 5, "lat": 64, "lon": 64})
-
-        self.kt_data = xr.Dataset({
-            "nowcast": kt_nowcast,
-            "observation": kt_observation,
-        })
+        self.kt_data = xr.Dataset({"nowcast": kt_nowcast, "observation": kt_observation})
         self.kt_data = self.kt_data.assign_coords(
             valid_time=(("initialization_time", "lead_time"), aligned.valid_time.data)
         )
-        print(f"  Clear-sky index (kt) calculation complete.")
+        print("  Clear-sky index (kt) calculation complete.")
         return self.kt_data
-        '''
 
-    def calculate_mae(self, data: xr.Dataset, groupby_time_of_day=False) -> xr.DataArray:
+    def calculate_mae(self, data: xr.Dataset, groupby_time_of_day: bool = False) -> xr.DataArray:
         """
         Mean Absolute Error.
-        Grouped by valid_time hour: dims (hour, lead_time, lat, lon)
-        Otherwise dims (lead_time, lat, lon).
+
+        Without grouping: dims (lead_time, lat, lon).
+        With groupby_time_of_day=True: dims (hour, lead_time, lat, lon).
         """
         if data is None:
             raise RuntimeError("Provide a dataset to calculate scores on.")
-
         if isinstance(data, xr.DataArray):
-            # Already-aggregated time-series (e.g. mae_by_init) can be passed through.
             if groupby_time_of_day:
                 raise ValueError("groupby_time_of_day is not supported for DataArray input")
             return data
@@ -341,42 +644,40 @@ class ScoreCalculator:
             mae.name = "mae_by_hour"
         else:
             mae = scores.continuous.mae(
-                data["nowcast"],
-                data["observation"],
-                reduce_dims="initialization_time",
+                data["nowcast"], data["observation"], reduce_dims="initialization_time"
             )
             mae.name = "mae"
         return mae
 
-    def calculate_rmse(self, data: xr.Dataset, groupby_time_of_day=False) -> xr.DataArray:
+    def calculate_rmse(self, data: xr.Dataset, groupby_time_of_day: bool = False) -> xr.DataArray:
         """
         Root Mean Squared Error.
-        Grouped by valid_time hour: dims (hour, lead_time, lat, lon)
-        Otherwise dims (lead_time, lat, lon).
+
+        Without grouping: dims (lead_time, lat, lon).
+        With groupby_time_of_day=True: dims (hour, lead_time, lat, lon).
         """
         if data is None:
             raise RuntimeError("Provide a dataset to calculate scores on.")
-
         if isinstance(data, xr.DataArray):
             if groupby_time_of_day:
                 raise ValueError("groupby_time_of_day is not supported for DataArray input")
             return data
 
         if groupby_time_of_day:
-            sq_err = (data["nowcast"] - data["observation"])**2
-            rmse = np.sqrt(sq_err.groupby(data.valid_time.dt.hour).mean(dim="initialization_time"))
+            sq_err = (data["nowcast"] - data["observation"]) ** 2
+            rmse = np.sqrt(
+                sq_err.groupby(data.valid_time.dt.hour).mean(dim="initialization_time")
+            )
             rmse.name = "rmse_by_hour"
         else:
             rmse = scores.continuous.rmse(
-                data["nowcast"],
-                data["observation"],
-                reduce_dims="initialization_time",
+                data["nowcast"], data["observation"], reduce_dims="initialization_time"
             )
             rmse.name = "rmse"
         return rmse
 
     def calculate_mae_by_init(self) -> xr.DataArray:
-        """MAE for each init time and lead_time (avg over spatial dims)."""
+        """MAE for each (initialization_time, lead_time) averaged over (lat, lon)."""
         if self.aligned_data is None:
             raise RuntimeError("Call .align_data() first.")
         abs_err = np.abs(self.aligned_data["nowcast"] - self.aligned_data["observation"])
@@ -385,7 +686,7 @@ class ScoreCalculator:
         return out
 
     def calculate_rmse_by_init(self) -> xr.DataArray:
-        """RMSE for each init time and lead_time (avg over spatial dims)."""
+        """RMSE for each (initialization_time, lead_time) averaged over (lat, lon)."""
         if self.aligned_data is None:
             raise RuntimeError("Call .align_data() first.")
         sq_err = (self.aligned_data["nowcast"] - self.aligned_data["observation"]) ** 2
@@ -394,7 +695,7 @@ class ScoreCalculator:
         return out
 
     def calculate_mae_kt_by_init(self) -> xr.DataArray:
-        """KT MAE for each init time and lead_time (avg over spatial dims)."""
+        """KT MAE for each (initialization_time, lead_time) averaged over (lat, lon)."""
         if self.kt_data is None:
             raise RuntimeError("Call .calculate_kt() first.")
         abs_err = np.abs(self.kt_data["nowcast"] - self.kt_data["observation"])
@@ -403,7 +704,7 @@ class ScoreCalculator:
         return out
 
     def calculate_rmse_kt_by_init(self) -> xr.DataArray:
-        """KT RMSE for each init time and lead_time (avg over spatial dims)."""
+        """KT RMSE for each (initialization_time, lead_time) averaged over (lat, lon)."""
         if self.kt_data is None:
             raise RuntimeError("Call .calculate_kt() first.")
         sq_err = (self.kt_data["nowcast"] - self.kt_data["observation"]) ** 2
@@ -412,64 +713,213 @@ class ScoreCalculator:
         return out
 
 
+# =============================================================================
+# 5. GROUND SCORE CALCULATOR
+# =============================================================================
+
+class GroundScoreCalculator:
+    """
+    Validates nowcasts against point-based ground station observations.
+
+    For each station, the nearest nowcast grid cell is found using Euclidean
+    distance on (lat, lon) coordinates. Scores are then aggregated over stations.
+
+    Parameters
+    ----------
+    nowcast_data : xr.Dataset
+        Output of SatelliteNowcastLoader.load_data() — dims (initialization_time, lead_time, lat, lon).
+    ground_obs : xr.Dataset
+        Output of GroundObservationLoader.load_data() — dims (time, station_id),
+        with 'lat' and 'lon' coordinate variables per station.
+    nowcast_ghi_var : str
+    obs_ghi_var : str
+    obs_cs_ghi_var : str
+    """
+
+    def __init__(
+        self,
+        nowcast_data: xr.Dataset,
+        ground_obs: xr.Dataset,
+        nowcast_ghi_var: str,
+        obs_ghi_var: str,
+        obs_cs_ghi_var: str = "cs_ghi",
+    ):
+        self.nowcast_data    = nowcast_data
+        self.ground_obs      = ground_obs
+        self.nowcast_ghi_var = nowcast_ghi_var
+        self.obs_ghi_var     = obs_ghi_var
+        self.obs_cs_ghi_var  = obs_cs_ghi_var
+        self.aligned_data: xr.Dataset | None = None
+
+    def _nearest_grid_indices(self) -> tuple[np.ndarray, np.ndarray]:
+        """
+        For each station, find the (lat_idx, lon_idx) of the nearest nowcast grid cell.
+
+        Returns
+        -------
+        lat_idxs, lon_idxs : ndarray of int
+            One index per station.
+        """
+        grid_lat = np.asarray(self.nowcast_data["lat"].values)
+        grid_lon = np.asarray(self.nowcast_data["lon"].values)
+        sta_lat  = np.asarray(self.ground_obs["lat"].values)
+        sta_lon  = np.asarray(self.ground_obs["lon"].values)
+
+        # Broadcast to find nearest cell for each station
+        lat_idxs = np.argmin(np.abs(grid_lat[:, None] - sta_lat[None, :]), axis=0)
+        lon_idxs = np.argmin(np.abs(grid_lon[:, None] - sta_lon[None, :]), axis=0)
+        return lat_idxs, lon_idxs
+
+    def align_data(self) -> xr.Dataset:
+        """
+        Extract nowcast values at each station's nearest grid cell and align with
+        observed values by valid_time.
+
+        Result is stored in self.aligned_data with dims
+        (initialization_time, lead_time, station_id).
+        """
+        lat_idxs, lon_idxs = self._nearest_grid_indices()
+        stations = self.ground_obs["station_id"].values
+        n_stations = len(stations)
+
+        nwc = self.nowcast_data[self.nowcast_ghi_var]
+        if "ensemble" in nwc.dims:
+            nwc = nwc.isel(ensemble=0, drop=True)
+
+        n_init = nwc.sizes["initialization_time"]
+        n_lead = nwc.sizes["lead_time"]
+
+        # Extract nowcast at station grid cells: (init, lead, n_stations)
+        nwc_at_stations = np.full((n_init, n_lead, n_stations), np.nan, dtype=np.float32)
+        obs_at_stations = np.full((n_init, n_lead, n_stations), np.nan, dtype=np.float32)
+        cs_at_stations  = np.full((n_init, n_lead, n_stations), np.nan, dtype=np.float32)
+
+        valid_times = np.asarray(self.nowcast_data["valid_time"].values)  # (n_init, n_lead)
+
+        # Pull nowcast grid values for each station
+        for s_idx in range(n_stations):
+            li = int(lat_idxs[s_idx])
+            loi = int(lon_idxs[s_idx])
+            nwc_at_stations[:, :, s_idx] = nwc.isel(lat=li, lon=loi).values
+
+        # Match observations by time
+        obs_time = pd.DatetimeIndex(self.ground_obs["time"].values)
+        obs_ghi  = self.ground_obs[self.obs_ghi_var].values   # (n_time, n_stations)
+        obs_cs   = self.ground_obs[self.obs_cs_ghi_var].values if self.obs_cs_ghi_var in self.ground_obs else None
+
+        obs_time_to_idx = {t: i for i, t in enumerate(obs_time)}
+
+        for init_idx in range(n_init):
+            for lead_idx in range(n_lead):
+                vt = pd.Timestamp(valid_times[init_idx, lead_idx])
+                t_idx = obs_time_to_idx.get(vt)
+                if t_idx is not None:
+                    obs_at_stations[init_idx, lead_idx, :] = obs_ghi[t_idx, :]
+                    if obs_cs is not None:
+                        cs_at_stations[init_idx, lead_idx, :] = obs_cs[t_idx, :]
+
+        dims   = ("initialization_time", "lead_time", "station_id")
+        coords = {
+            "initialization_time": nwc.initialization_time,
+            "lead_time":           nwc.lead_time,
+            "station_id":          stations,
+        }
+
+        self.aligned_data = xr.Dataset({
+            "nowcast":     xr.DataArray(nwc_at_stations, dims=dims, coords=coords),
+            "observation": xr.DataArray(obs_at_stations, dims=dims, coords=coords),
+            "clearsky":    xr.DataArray(cs_at_stations,  dims=dims, coords=coords),
+        }).assign_coords(
+            valid_time=(("initialization_time", "lead_time"), valid_times)
+        )
+        print(f"  Ground alignment complete: {n_stations} stations x {n_init} init times.")
+        return self.aligned_data
+
+    def calculate_mae_by_init(self) -> xr.DataArray:
+        """MAE for each (initialization_time, lead_time) averaged over stations."""
+        if self.aligned_data is None:
+            raise RuntimeError("Call .align_data() first.")
+        abs_err = np.abs(self.aligned_data["nowcast"] - self.aligned_data["observation"])
+        out = abs_err.mean(dim="station_id")
+        out.name = "mae_by_init"
+        return out
+
+    def calculate_rmse_by_init(self) -> xr.DataArray:
+        """RMSE for each (initialization_time, lead_time) averaged over stations."""
+        if self.aligned_data is None:
+            raise RuntimeError("Call .align_data() first.")
+        sq_err = (self.aligned_data["nowcast"] - self.aligned_data["observation"]) ** 2
+        out = np.sqrt(sq_err.mean(dim="station_id"))
+        out.name = "rmse_by_init"
+        return out
+
+    def calculate_mae_by_station(self) -> xr.DataArray:
+        """MAE for each station averaged over all (initialization_time, lead_time) pairs."""
+        if self.aligned_data is None:
+            raise RuntimeError("Call .align_data() first.")
+        abs_err = np.abs(self.aligned_data["nowcast"] - self.aligned_data["observation"])
+        out = abs_err.mean(dim=["initialization_time", "lead_time"])
+        out.name = "mae_by_station"
+        return out
+
+    def calculate_rmse_by_station(self) -> xr.DataArray:
+        """RMSE for each station averaged over all (initialization_time, lead_time) pairs."""
+        if self.aligned_data is None:
+            raise RuntimeError("Call .align_data() first.")
+        sq_err = (self.aligned_data["nowcast"] - self.aligned_data["observation"]) ** 2
+        out = np.sqrt(sq_err.mean(dim=["initialization_time", "lead_time"]))
+        out.name = "rmse_by_station"
+        return out
+
+
+# =============================================================================
+# CLI ENTRY POINT
+# =============================================================================
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Satellite Nowcast Validation")
-    parser.add_argument("nowcast_dir", type=str, help="Directory with nowcast files")
-    parser.add_argument("obs_dir", type=str, help="Directory with observation files")
-    parser.add_argument("start_date", type=str, help="Start date (YYYY-MM-DD)")
-    parser.add_argument("end_date", type=str, help="End date (YYYY-MM-DD)")
-    parser.add_argument("output_file", type=str, help="Path to save the output scores NetCDF file")
-    parser.add_argument("--chunk_size", type=int, default=100, help="Number of initialization times to process per chunk")
-    parser.add_argument("--nowcast_ghi_var", type=str, default="probabilistic_advection", help="Name of the GHI variable in the nowcast files")
-    parser.add_argument("--obs_ghi_var", type=str, default="sds", help="Name of the GHI variable in the observation files")
-    parser.add_argument("--obs_cs_ghi_var", type=str, default="sds_cs", help="Name of the clear-sky GHI variable in the observation files")
+    parser.add_argument("nowcast_dir",  type=str, help="Directory with nowcast files")
+    parser.add_argument("obs_dir",      type=str, help="Directory with observation files")
+    parser.add_argument("start_date",   type=str, help="Start date (YYYY-MM-DD)")
+    parser.add_argument("end_date",     type=str, help="End date (YYYY-MM-DD)")
+    parser.add_argument("output_file",  type=str, help="Path to save the output scores NetCDF file")
+    parser.add_argument("--align-mode", type=str, default="auto",
+                        choices=["fast", "general", "auto"],
+                        help="Alignment mode (default: auto)")
+    parser.add_argument("--chunk_size", type=int, default=100,
+                        help="Chunk size for general alignment mode")
+    parser.add_argument("--nowcast_ghi_var",  type=str, default="probabilistic_advection")
+    parser.add_argument("--obs_ghi_var",      type=str, default="sds")
+    parser.add_argument("--obs_cs_ghi_var",   type=str, default="sds_cs")
 
     args = parser.parse_args()
 
     print("1. Loading data...")
     nowcast_loader = SatelliteNowcastLoader(data_dir=args.nowcast_dir)
-    nowcast_data = nowcast_loader.load_data(args.start_date, args.end_date)
+    nowcast_data   = nowcast_loader.load_data(args.start_date, args.end_date)
 
     obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir)
-    obs_data = obs_loader.load_data(args.start_date, args.end_date)
+    obs_data   = obs_loader.load_data(args.start_date, args.end_date)
 
     print("\n2. Aligning data...")
     calculator = ScoreCalculator(
-        nowcast_data, 
-        obs_data,
+        nowcast_data, obs_data,
         nowcast_ghi_var=args.nowcast_ghi_var,
         obs_ghi_var=args.obs_ghi_var,
-        obs_cs_ghi_var=args.obs_cs_ghi_var
+        obs_cs_ghi_var=args.obs_cs_ghi_var,
     )
-    aligned_data = calculator.align_data(chunk_size=args.chunk_size)
-    
-    print("\n3. Calculating clear-sky index (kt)...")
-    kt_data = calculator.calculate_kt()
+    aligned_data = calculator.align_data(mode=args.align_mode, chunk_size=args.chunk_size)
 
-    print("\n4. Calculating scores...")
-    mae = calculator.calculate_mae(aligned_data)
-    rmse = calculator.calculate_rmse(aligned_data)
-    
-    mae_kt = calculator.calculate_mae(kt_data)
-    rmse_kt = calculator.calculate_rmse(kt_data)
-
-    mae_by_init = calculator.calculate_mae_by_init()
+    print("\n3. Calculating scores...")
+    mae_by_init  = calculator.calculate_mae_by_init()
     rmse_by_init = calculator.calculate_rmse_by_init()
-    mae_kt_by_init = calculator.calculate_mae_kt_by_init()
-    rmse_kt_by_init = calculator.calculate_rmse_kt_by_init()
 
     scores_ds = xr.Dataset({
-        "mae": mae,
-        "rmse": rmse,
-        "mae_kt": mae_kt,
-        "rmse_kt": rmse_kt,
-        "mae_by_init": mae_by_init,
+        "mae_by_init":  mae_by_init,
         "rmse_by_init": rmse_by_init,
-        "mae_kt_by_init": mae_kt_by_init,
-        "rmse_kt_by_init": rmse_kt_by_init,
     })
 
-    print(f"\n5. Saving scores to {args.output_file}...")
+    print(f"\n4. Saving scores to {args.output_file}...")
     scores_ds.to_netcdf(args.output_file)
 
     print("\nValidation complete.")
