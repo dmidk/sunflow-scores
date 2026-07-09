@@ -66,6 +66,21 @@ done
 ```
 
 
+### Restrict to a domain (bounding box)
+By default the validation runs over the whole satellite/nowcast domain. To restrict it to a
+geographic bounding box (for example only Denmark), pass `--bbox` as
+`LON_MIN LAT_MIN LON_MAX LAT_MAX`:
+```bash
+uv run python run_validation.py \
+  --start 2025-06-01 \
+  --end 2025-06-03 \
+  --nwc-dir /path/to/nowcasts \
+  --obs-dir /path/to/observations \
+  --bbox 7.5 54.5 13.0 58.0
+```
+The bounding box is applied identically to the nowcast and satellite observation grids, so the
+fast same-grid alignment stays valid. Denmark's approximate box is `7.5 54.5 13.0 58.0`.
+
 ### Custom variable names
 If your files use different variable names, pass them explicitly:
 ```bash
@@ -87,6 +102,7 @@ uv run python run_validation.py \
 | `--nwc-dir` | Directory containing the nowcast NetCDF files. | Yes | |
 | `--obs-dir` | Directory containing the observation NetCDF files. | Yes | |
 | `--output-dir` | Directory where the output score files are written. | No | `results` |
+| `--bbox` | Restrict validation to a geographic bounding box: `LON_MIN LAT_MIN LON_MAX LAT_MAX` (e.g. Denmark: `7.5 54.5 13.0 58.0`). | No | none (whole domain) |
 | `--nowcast_ghi_var` | GHI variable in the nowcast files. | No | `probabilistic_advection` |
 | `--obs_ghi_var` | GHI variable in the observation files. | No | `sds` |
 | `--obs_cs_ghi_var` | Clear-sky GHI variable in the observation files. | No | `sds_cs` |
@@ -160,6 +176,38 @@ uv run python plot_monthly_heatmaps.py \
 
 The monthly script does not require every day of the month to be present. It will plot whatever daily CSVs exist for that month, which is useful when some days were skipped because there was no data.
 
+### Per-month scores for a single lead time
+Use `plot_leadtime_monthly.py` to extract only one lead time of choice (e.g. the
+60-minute lead time) from every daily CSV and plot the mean score for that lead
+time as one bar per calendar month.
+
+```bash
+uv run python plot_leadtime_monthly.py \
+  --input results \
+  --lead-time 60 \
+  --metric both \
+  --output-dir results/plots
+```
+
+The `--lead-time` value is given in minutes and must match a `lead_time_minutes`
+value present in the CSVs (0, 15, 30, ...). With `--metric both` each month shows
+two grouped bars (MAE and RMSE); use `--metric mae` or `--metric rmse` for a
+single bar per month. The output is written to
+`monthly_scores_leadtime_<N>min_<metric>.png`.
+
+### Seasonal diurnal-cycle plot
+Use `plot_seasonal_diurnal_cycles.py` to average the monthly diurnal-cycle curves into the four meteorological seasons.
+
+Example for MAE only:
+```bash
+uv run python plot_seasonal_diurnal_cycles.py \
+  --input results \
+  --metric mae \
+  --output-dir results/seasonal_plots
+```
+
+The script first computes each month's diurnal-cycle average, then averages those monthly curves within each season so the three months contribute equally.
+
 ## 📂 Project Structure
 The core library code lives under `src/sunflow_scores/`.
 ```text
@@ -172,6 +220,8 @@ sunflow-scores/
 ├── run_validation.py         # Daily validation script: writes one scores_YYYYMMDD.csv per run
 ├── plot_daily_scores.py      # Plot one day or a directory of daily CSVs
 ├── plot_monthly_heatmaps.py  # Plot monthly summaries / averaged heatmaps from daily CSVs
+├── plot_leadtime_monthly.py  # Plot per-month scores for a single chosen lead time
+├── plot_seasonal_diurnal_cycles.py  # Plot 4-season averages of monthly diurnal-cycle curves
 ├── pyproject.toml            # uv dependency definitions
 ├── uv.lock                   # Strictly locked dependency hashes
 ├── .gitignore                # Excludes data files and results

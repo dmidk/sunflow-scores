@@ -74,6 +74,59 @@ def _filter_files_by_time(
     return sorted(selected)
 
 
+def _subset_to_bbox(
+    ds: xr.Dataset,
+    bbox: tuple[float, float, float, float] | None,
+) -> xr.Dataset:
+    """
+    Restrict a lat/lon-gridded Dataset to a geographic bounding box.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Dataset with 1-D 'lat' and 'lon' coordinates.
+    bbox : tuple(lon_min, lat_min, lon_max, lat_max) or None
+        Bounding box in degrees. If None the dataset is returned unchanged.
+        Example (Denmark): (7.5, 54.5, 13.0, 58.0).
+
+    Notes
+    -----
+    Handles both ascending and descending latitude/longitude axes so that
+    xarray's ``slice`` selection never returns an empty result due to axis
+    ordering.
+    """
+    if bbox is None:
+        return ds
+    if "lat" not in ds.coords or "lon" not in ds.coords:
+        print("  WARNING: bbox requested but dataset has no lat/lon coords; skipping subset.")
+        return ds
+
+    lon_min, lat_min, lon_max, lat_max = bbox
+
+    lat_vals = np.asarray(ds["lat"].values)
+    lon_vals = np.asarray(ds["lon"].values)
+    lat_ascending = lat_vals.size < 2 or lat_vals[0] <= lat_vals[-1]
+    lon_ascending = lon_vals.size < 2 or lon_vals[0] <= lon_vals[-1]
+
+    lat_slice = slice(lat_min, lat_max) if lat_ascending else slice(lat_max, lat_min)
+    lon_slice = slice(lon_min, lon_max) if lon_ascending else slice(lon_max, lon_min)
+
+    subset = ds.sel(lat=lat_slice, lon=lon_slice)
+
+    if subset.sizes.get("lat", 0) == 0 or subset.sizes.get("lon", 0) == 0:
+        raise ValueError(
+            f"Bounding box {bbox} selected no grid cells. "
+            f"Data covers lat [{lat_vals.min()}, {lat_vals.max()}], "
+            f"lon [{lon_vals.min()}, {lon_vals.max()}]."
+        )
+
+    print(
+        f"  Restricted to bbox lon=[{lon_min}, {lon_max}] lat=[{lat_min}, {lat_max}] "
+        f"-> {subset.sizes.get('lat')} x {subset.sizes.get('lon')} grid cells."
+    )
+    return subset
+
+
 # =============================================================================
 # 1. NOWCAST LOADER
 # =============================================================================
@@ -81,8 +134,9 @@ def _filter_files_by_time(
 class SatelliteNowcastLoader:
     """Loads solar irradiance nowcast files into a single xarray Dataset."""
 
-    def __init__(self, data_dir: str):
+    def __init__(self, data_dir: str, bbox: tuple[float, float, float, float] | None = None):
         self.data_dir = Path(data_dir)
+        self.bbox = bbox
 
     def _preprocess_nowcast(self, ds: xr.Dataset) -> xr.Dataset:
         """
@@ -167,7 +221,7 @@ class SatelliteNowcastLoader:
 
         print(f"  Found {len(files_to_open)} nowcast files from {start_date} to {end_date}.")
 
-        return xr.open_mfdataset(
+        ds = xr.open_mfdataset(
             [str(p) for p in files_to_open],
             combine="nested",
             concat_dim="initialization_time",
@@ -181,6 +235,7 @@ class SatelliteNowcastLoader:
                 "lon": 128,
             },
         )
+        return _subset_to_bbox(ds, self.bbox)
 
 
 # =============================================================================
@@ -190,8 +245,9 @@ class SatelliteNowcastLoader:
 class SatelliteObservationLoader:
     """Loads satellite observation (ground-truth) files into a single xarray Dataset."""
 
-    def __init__(self, data_dir: str):
+    def __init__(self, data_dir: str, bbox: tuple[float, float, float, float] | None = None):
         self.data_dir = Path(data_dir)
+        self.bbox = bbox
 
     def _preprocess_observation(self, ds: xr.Dataset) -> xr.Dataset:
         """Drop the 'crs' scalar variable and normalise spatial dim names."""
@@ -243,7 +299,8 @@ class SatelliteObservationLoader:
             parallel=True,
             chunks={"time": 256, "lat": 128, "lon": 128},
         )
-        return ds.sel(time=slice(start_date, end_date)).sortby("time")
+        ds = ds.sel(time=slice(start_date, end_date)).sortby("time")
+        return _subset_to_bbox(ds, self.bbox)
 
 
 # =============================================================================
@@ -891,14 +948,22 @@ if __name__ == "__main__":
     parser.add_argument("--nowcast_ghi_var",  type=str, default="probabilistic_advection")
     parser.add_argument("--obs_ghi_var",      type=str, default="sds")
     parser.add_argument("--obs_cs_ghi_var",   type=str, default="sds_cs")
+    parser.add_argument(
+        "--bbox", type=float, nargs=4, default=None,
+        metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"),
+        help="Restrict validation to a geographic bounding box, given as "
+             "lon_min lat_min lon_max lat_max (e.g. Denmark: 7.5 54.5 13.0 58.0).",
+    )
 
     args = parser.parse_args()
 
+    bbox = tuple(args.bbox) if args.bbox is not None else None
+
     print("1. Loading data...")
-    nowcast_loader = SatelliteNowcastLoader(data_dir=args.nowcast_dir)
+    nowcast_loader = SatelliteNowcastLoader(data_dir=args.nowcast_dir, bbox=bbox)
     nowcast_data   = nowcast_loader.load_data(args.start_date, args.end_date)
 
-    obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir)
+    obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir, bbox=bbox)
     obs_data   = obs_loader.load_data(args.start_date, args.end_date)
 
     print("\n2. Aligning data...")

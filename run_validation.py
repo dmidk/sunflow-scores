@@ -101,6 +101,13 @@ def parse_args() -> argparse.Namespace:
         "--chunk-size", type=int, default=50,
         help="Chunk size for general alignment mode (default: 50)",
     )
+    parser.add_argument(
+        "--bbox", type=float, nargs=4, default=None,
+        metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"),
+        help="Restrict validation to a geographic bounding box, given as "
+             "lon_min lat_min lon_max lat_max (e.g. Denmark: 7.5 54.5 13.0 58.0). "
+             "Applies to the nowcast and satellite observation grids.",
+    )
     parser.add_argument("--nowcast_ghi_var",  type=str, default="probabilistic_advection",
                         help="Name of the GHI variable in the nowcast files")
     parser.add_argument("--obs_ghi_var",      type=str, default="sds",
@@ -130,6 +137,8 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    bbox = tuple(args.bbox) if args.bbox is not None else None
+
     date_tag = nwc_start.strftime("%Y%m%d")
     obs_mode = "ground" if args.ground_obs else "satellite"
 
@@ -137,6 +146,8 @@ def main() -> None:
     print(f"  Validation run  [{obs_mode} observations]")
     print(f"  Nowcasts : {nwc_start}  →  {nwc_end}")
     print(f"  Output   : {output_dir}/")
+    if bbox is not None:
+        print(f"  Domain   : bbox lon=[{bbox[0]}, {bbox[2]}] lat=[{bbox[1]}, {bbox[3]}]")
     print(f"{'=' * 60}\n")
 
     def _skip_day(message: str) -> None:
@@ -151,7 +162,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     t_step = time.perf_counter()
     print("Step 1/4 — Loading nowcasts...")
-    nwc_loader = SatelliteNowcastLoader(data_dir=args.nwc_dir)
+    nwc_loader = SatelliteNowcastLoader(data_dir=args.nwc_dir, bbox=bbox)
     try:
         nowcast_ds = nwc_loader.load_data(nwc_start, nwc_end)
     except ValueError as exc:
@@ -181,7 +192,7 @@ def main() -> None:
     obs_end   = pd.Timestamp(nwc_valid_max.values) + pd.Timedelta(minutes=15)
 
     if obs_mode == "satellite":
-        obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir)
+        obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir, bbox=bbox)
         try:
             obs_ds = obs_loader.load_data(obs_start, obs_end)
         except ValueError as exc:
