@@ -43,6 +43,7 @@ from sunflow_scores.validator import (
     GroundObservationLoader,
     ScoreCalculator,
     GroundScoreCalculator,
+    _open_with_retry,
 )
 
 dask.config.set(scheduler="threads")
@@ -165,7 +166,7 @@ def main() -> None:
     nwc_loader = SatelliteNowcastLoader(data_dir=args.nwc_dir, bbox=bbox)
     try:
         nowcast_ds = nwc_loader.load_data(nwc_start, nwc_end)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         _skip_day(str(exc))
         return
 
@@ -195,7 +196,7 @@ def main() -> None:
         obs_loader = SatelliteObservationLoader(data_dir=args.obs_dir, bbox=bbox)
         try:
             obs_ds = obs_loader.load_data(obs_start, obs_end)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             _skip_day(str(exc))
             return
         obs_min, obs_max = dask.compute(obs_ds.time.min(), obs_ds.time.max())
@@ -210,7 +211,7 @@ def main() -> None:
         )
         try:
             obs_ds = ground_loader.load_data(obs_start, obs_end)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             _skip_day(str(exc))
             return
         print(f"  {obs_ds.sizes['station_id']} stations, "
@@ -233,7 +234,7 @@ def main() -> None:
         )
         try:
             scorer.align_data(mode=args.align_mode, chunk_size=args.chunk_size)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             _skip_day(str(exc))
             return
     else:
@@ -246,7 +247,7 @@ def main() -> None:
         )
         try:
             scorer.align_data()
-        except (ValueError, RuntimeError) as exc:
+        except (ValueError, RuntimeError, OSError) as exc:
             _skip_day(str(exc))
             return
 
@@ -263,7 +264,13 @@ def main() -> None:
     rmse_by_init_lazy = scorer.calculate_rmse_by_init()
 
     t_compute = time.perf_counter()
-    mae_by_init, rmse_by_init = dask.compute(mae_by_init_lazy, rmse_by_init_lazy)
+    try:
+        mae_by_init, rmse_by_init = _open_with_retry(
+            dask.compute, mae_by_init_lazy, rmse_by_init_lazy
+        )
+    except OSError as exc:
+        _skip_day(str(exc))
+        return
     stage_times["scores/compute"] = time.perf_counter() - t_compute
 
     scores_ds = xr.Dataset({"mae_by_init": mae_by_init, "rmse_by_init": rmse_by_init})

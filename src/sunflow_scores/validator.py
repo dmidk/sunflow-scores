@@ -21,6 +21,8 @@ Alignment modes (ScoreCalculator.align_data):
 from __future__ import annotations
 
 import argparse
+import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -28,10 +30,47 @@ import pandas as pd
 import scores.continuous
 import xarray as xr
 
+# HDF5's file-locking mechanism is unreliable (and often unsupported) on
+# networked filesystems such as NFS/Lustre, causing spurious
+# "OSError: [Errno 121] Unable to synchronously open file (unable to lock
+# file, errno = 121, error message = 'Remote I/O error')" failures when
+# reading .nc files from a mounted data drive on the server. Disabling HDF5's
+# own file locking (the same effect as `lock=False` in xarray) avoids this.
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+
+# errno values that indicate a transient/remote filesystem hiccup rather than
+# a real problem with the file itself; worth a short retry before giving up.
+_TRANSIENT_IO_ERRNOS = {121, 5, 11, 116}  # Remote I/O error, I/O error, EAGAIN, stale handle
+
 
 # =============================================================================
 # HELPERS
 # =============================================================================
+
+
+def _open_with_retry(open_fn, *args, retries: int = 3, delay: float = 2.0, **kwargs):
+    """
+    Call *open_fn* (e.g. xr.open_mfdataset/xr.open_dataset), retrying a few
+    times if it fails with a transient remote-I/O / file-locking OSError.
+
+    This guards against flaky network-filesystem reads (NFS/Lustre) where a
+    single day can fail with errno 121 ("Remote I/O error") even though the
+    file is perfectly readable moments later.
+    """
+    last_exc: OSError | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return open_fn(*args, **kwargs)
+        except OSError as exc:
+            last_exc = exc
+            if getattr(exc, "errno", None) not in _TRANSIENT_IO_ERRNOS or attempt == retries:
+                raise
+            print(
+                f"  WARNING: transient I/O error opening files "
+                f"(attempt {attempt}/{retries}): {exc}. Retrying in {delay:.0f}s..."
+            )
+            time.sleep(delay)
+    raise last_exc  # pragma: no cover - unreachable, satisfies type checkers
 
 def _parse_nowcast_timestamp(path: Path) -> pd.Timestamp | None:
     """Return the initialization time encoded in a nowcast filename, or None."""
@@ -221,13 +260,15 @@ class SatelliteNowcastLoader:
 
         print(f"  Found {len(files_to_open)} nowcast files from {start_date} to {end_date}.")
 
-        ds = xr.open_mfdataset(
+        ds = _open_with_retry(
+            xr.open_mfdataset,
             [str(p) for p in files_to_open],
             combine="nested",
             concat_dim="initialization_time",
             preprocess=self._preprocess_nowcast,
             engine="h5netcdf",
             parallel=True,
+            lock=False,
             chunks={
                 "initialization_time": 8,
                 "lead_time": 32,
@@ -291,12 +332,14 @@ class SatelliteObservationLoader:
 
         print(f"  Loading {len(files_to_open)} observation files from {start_date.date()} to {end_date.date()}")
 
-        ds = xr.open_mfdataset(
+        ds = _open_with_retry(
+            xr.open_mfdataset,
             [str(p) for p in files_to_open],
             combine="by_coords",
             preprocess=self._preprocess_observation,
             engine="h5netcdf",
             parallel=True,
+            lock=False,
             chunks={"time": 256, "lat": 128, "lon": 128},
         )
         ds = ds.sel(time=slice(start_date, end_date)).sortby("time")
@@ -403,7 +446,7 @@ class GroundObservationLoader:
 
     def _load_netcdf(self, path: Path, start_date: pd.Timestamp, end_date: pd.Timestamp) -> xr.Dataset:
         """Load a NetCDF ground-observation file."""
-        ds = xr.open_dataset(str(path), engine="h5netcdf")
+        ds = _open_with_retry(xr.open_dataset, str(path), engine="h5netcdf", lock=False)
         ds = ds.sel(time=slice(start_date, end_date)).sortby("time")
         if ds.sizes["time"] == 0:
             raise ValueError(f"No ground observations in [{start_date}, {end_date}] in {path}.")
