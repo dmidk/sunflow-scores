@@ -208,6 +208,59 @@ uv run python plot_seasonal_diurnal_cycles.py \
 
 The script first computes each month's diurnal-cycle average, then averages those monthly curves within each season so the three months contribute equally.
 
+## 🔀 Two-model comparison workflow
+This end-to-end workflow re-validates one model version and validates another over the
+**same Denmark cut-out domain** for a full year, then overlays their scores on shared
+comparison figures. It can be reproduced for any future pair of model versions.
+
+### 1. Run the yearly Denmark-domain validation per version
+`run_validation_denmark.sh` takes the model version as its only argument, always injects the
+Denmark bounding box (`7.5 54.5 13.0 58.0`), loops every day of the year, and writes one
+`scores_YYYYMMDD.csv` per day into a per-version output directory. Run it once per version:
+```bash
+./run_validation_denmark.sh v1.0.0
+./run_validation_denmark.sh v1.0.1
+```
+Each run resolves its nowcast input (`.../sunflow_validation_output/<version>`), the shared
+observation directory, and its own scores output
+(`.../sunflow_validation_scores/2025_denmark/<version>`); the resolved paths and the exact
+`run_validation.py --bbox 7.5 54.5 13.0 58.0` command are printed for each day. This leaves
+two directories of daily CSVs — one per model — to compare.
+
+### 2. Compare the two models with `plot_model_comparison.py`
+`plot_model_comparison.py` reads two (or more) labelled score directories and draws them on a
+single figure. It has two modes.
+
+**Lead-time line graph (0 → 360 min)** — one line per model:
+```bash
+uv run python plot_model_comparison.py \
+  --inputs /path/to/scores/v1.0.0 /path/to/scores/v1.0.1 \
+  --labels v1.0.0 v1.0.1 \
+  --mode leadtime-line \
+  --metric both \
+  --output-dir plots
+```
+Writes `comparison_leadtime_line_<metric>.png`.
+
+**Monthly bar chart at the 15- and 30-minute horizons** — grouped bars per model per month:
+```bash
+uv run python plot_model_comparison.py \
+  --inputs /path/to/scores/v1.0.0 /path/to/scores/v1.0.1 \
+  --labels v1.0.0 v1.0.1 \
+  --mode monthly-bars \
+  --lead-time 15,30 \
+  --metric both \
+  --output-dir plots
+```
+Writes one figure per requested lead time:
+`comparison_monthly_leadtime_15min_<metric>.png` and
+`comparison_monthly_leadtime_30min_<metric>.png`.
+
+The `--inputs` and `--labels` lists must have the same number of entries. For `monthly-bars`,
+each requested `--lead-time` must be present in the CSVs, otherwise a clear error naming the
+missing lead time is raised. Coverage may differ between models (missing days/months); the
+aggregation is a mean over available days, so both curves/bars still render for the data present.
+
 ## 📂 Project Structure
 The core library code lives under `src/sunflow_scores/`.
 ```text
@@ -222,6 +275,8 @@ sunflow-scores/
 ├── plot_monthly_heatmaps.py  # Plot monthly summaries / averaged heatmaps from daily CSVs
 ├── plot_leadtime_monthly.py  # Plot per-month scores for a single chosen lead time
 ├── plot_seasonal_diurnal_cycles.py  # Plot 4-season averages of monthly diurnal-cycle curves
+├── plot_model_comparison.py  # Compare two model versions: lead-time line + monthly bars
+├── run_validation_denmark.sh # Year-long Denmark-domain validation runner (per model version)
 ├── pyproject.toml            # uv dependency definitions
 ├── uv.lock                   # Strictly locked dependency hashes
 ├── .gitignore                # Excludes data files and results
