@@ -86,25 +86,29 @@ def _open_with_retry(open_fn, *args, retries: int = 3, delay: float = 2.0, **kwa
 
 def _compute_scores_per_init(mae_lazy: xr.DataArray, rmse_lazy: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
     """
-    Compute scores by initialization_time, skipping corrupted inits on transient I/O errors.
+    Compute scores by initialization_time, filling corrupted inits with NaN on transient I/O errors.
 
-    If one initialization_time fails due to h5netcdf corruption, that init is skipped and
-    the rest of the day's data is preserved. This is better than failing the entire day
-    when only one timestep's file is unreadable.
+    If one initialization_time fails due to h5netcdf corruption, that init's output is filled
+    with NaN and the rest of the day's data is preserved. All computation is eager (not lazy)
+    to avoid re-opening h5netcdf files during later operations.
     """
     inits = mae_lazy.coords["initialization_time"].values
+    lead_times = mae_lazy.coords["lead_time"].values
+    n_lead = len(lead_times)
+
     mae_parts = []
     rmse_parts = []
-    skipped_inits = []
+    failed_inits = []
 
     for init in inits:
         mae_sel = mae_lazy.sel(initialization_time=init)
         rmse_sel = rmse_lazy.sel(initialization_time=init)
         try:
             mae_val, rmse_val = dask.compute(mae_sel, rmse_sel)
-            mae_parts.append(mae_val)
-            rmse_parts.append(rmse_val)
-        except (OSError, AttributeError, RuntimeError, KeyError) as exc:
+            # Ensure we have numpy arrays (eager, not lazy)
+            mae_parts.append(np.asarray(mae_val.values, dtype="float32"))
+            rmse_parts.append(np.asarray(rmse_val.values, dtype="float32"))
+        except Exception as exc:
             exc_str = str(exc).lower()
             is_h5_corruption = (
                 "nonetype" in exc_str or
@@ -116,19 +120,35 @@ def _compute_scores_per_init(mae_lazy: xr.DataArray, rmse_lazy: xr.DataArray) ->
                 "_h5ds" in exc_str
             )
             if is_h5_corruption:
-                print(f"    SKIP init {init}: h5netcdf corruption ({exc.__class__.__name__})")
-                skipped_inits.append(init)
+                print(f"    FILL init {init} with NaN: h5netcdf corruption ({exc.__class__.__name__})")
+                failed_inits.append(init)
+                mae_parts.append(np.full(n_lead, np.nan, dtype="float32"))
+                rmse_parts.append(np.full(n_lead, np.nan, dtype="float32"))
             else:
                 raise
 
     if not mae_parts:
         raise ValueError("All initialization_time steps failed; day is unusable")
 
-    mae_result = xr.concat(mae_parts, dim="initialization_time")
-    rmse_result = xr.concat(rmse_parts, dim="initialization_time")
+    # Stack eager numpy arrays back into xarray DataArrays with proper coords
+    mae_data = np.stack(mae_parts, axis=0)
+    rmse_data = np.stack(rmse_parts, axis=0)
 
-    if skipped_inits:
-        print(f"    Skipped {len(skipped_inits)} corrupt init(s), computed {len(mae_parts)} inits successfully")
+    mae_result = xr.DataArray(
+        mae_data,
+        coords={"initialization_time": inits, "lead_time": lead_times},
+        dims=["initialization_time", "lead_time"],
+        name="mae_by_init"
+    )
+    rmse_result = xr.DataArray(
+        rmse_data,
+        coords={"initialization_time": inits, "lead_time": lead_times},
+        dims=["initialization_time", "lead_time"],
+        name="rmse_by_init"
+    )
+
+    if failed_inits:
+        print(f"    Filled {len(failed_inits)} corrupt init(s) with NaN, computed {len(mae_parts) - len(failed_inits)} inits successfully")
 
     return mae_result, rmse_result
 
