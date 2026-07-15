@@ -232,7 +232,7 @@ def main() -> None:
     input_dir = Path(args.input)
     output_dir = Path(args.output_dir)
 
-    csv_files = sorted(input_dir.glob("scores_*.csv"))
+    csv_files = sorted(input_dir.rglob("scores_*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No scores_*.csv files found in {input_dir}")
 

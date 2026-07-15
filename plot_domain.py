@@ -25,12 +25,30 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--bbox",
+        "--validation-bbox",
         nargs=4,
         type=float,
         metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"),
-        default=[7.5, 54.5, 13.0, 58.0],
-        help="Bounding box: LON_MIN LAT_MIN LON_MAX LAT_MAX (Denmark by default).",
+        default=[7.5, 54.5, 15.5, 58.0],
+        help="Validation bounding box: LON_MIN LAT_MIN LON_MAX LAT_MAX (Denmark by default).",
+    )
+
+    parser.add_argument(
+        "--outer-domain-bbox",
+        nargs=4,
+        type=float,
+        metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"),
+        default=[-20.75,37.25,30,73.5],
+        help="Outer domain bounding box: LON_MIN LAT_MIN LON_MAX LAT_MAX (NW Europe nowcast domain by default).",
+    )
+
+    parser.add_argument(
+        "--inner-domain-bbox",
+        nargs=4,
+        type=float,
+        metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"),
+        default=[-10.75,47.25,20,63.5],
+        help="Outer domain bounding box: LON_MIN LAT_MIN LON_MAX LAT_MAX (NW Europe nowcast domain by default).",
     )
     parser.add_argument(
         "--label",
@@ -47,20 +65,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    lon_min, lat_min, lon_max, lat_max = args.bbox
+    lon_min, lat_min, lon_max, lat_max = args.validation_bbox
+    lon_min_outer, lat_min_outer, lon_max_outer, lat_max_outer = args.outer_domain_bbox
+    lon_min_inner, lat_min_inner, lon_max_inner, lat_max_inner = args.inner_domain_bbox
 
-    # Give the map a margin around the box so the surroundings are visible.
-    margin_lon = max(2.0, (lon_max - lon_min) * 0.6)
-    margin_lat = max(2.0, (lat_max - lat_min) * 0.6)
 
     fig = plt.figure(figsize=(9, 8))
     ax = plt.axes(projection=ccrs.PlateCarree())
     ax.set_extent(
-        [
-            lon_min - margin_lon,
-            lon_max + margin_lon,
-            lat_min - margin_lat,
-            lat_max + margin_lat,
+        [   lon_min_outer,
+            lon_max_outer,
+            lat_min_outer,
+            lat_max_outer,
         ],
         crs=ccrs.PlateCarree(),
     )
@@ -98,10 +114,37 @@ def main() -> None:
         )
     )
 
+    # The inner nowcasting output domain (bounding box).
+    rect = mpatches.Rectangle(
+        (lon_min_inner, lat_min_inner),
+        lon_max_inner - lon_min_inner,
+        lat_max_inner - lat_min_inner,
+        linewidth=2.5,
+        edgecolor="green",
+        facecolor="green",
+        alpha=0.18,
+        transform=ccrs.PlateCarree(),
+        zorder=5,
+    )
+    ax.add_patch(rect)
+    # Outline on top (no fill) so the border is crisp.
+    ax.add_patch(
+        mpatches.Rectangle(
+            (lon_min_inner, lat_min_inner),
+            lon_max_inner - lon_min_inner,
+            lat_max_inner - lat_min_inner,
+            linewidth=2.5,
+            edgecolor="green",
+            facecolor="none",
+            transform=ccrs.PlateCarree(),
+            zorder=6,
+        )
+    )
+
     # Annotate the corner coordinates.
     ax.plot(
         [lon_min, lon_max, lon_max, lon_min, lon_min],
-        [lat_min, lat_min, lat_max, lat_max, lat_min],
+        [lat_min_outer, lat_min_outer, lat_max_outer, lat_max_outer, lat_min_outer],
         transform=ccrs.PlateCarree(),
         color="crimson",
         linewidth=0,
@@ -109,21 +152,33 @@ def main() -> None:
     ax.text(
         (lon_min + lon_max) / 2,
         lat_max,
-        f"  {args.label} validation domain\n"
-        f"  lon {lon_min}–{lon_max}°E, lat {lat_min}–{lat_max}°N",
+        f"Validation domain",
         transform=ccrs.PlateCarree(),
         ha="center",
         va="bottom",
         fontsize=10,
         color="crimson",
-        fontweight="bold",
+        #fontweight="bold",
+    )
+
+
+    ax.text(
+        (lon_min_inner + lon_max_inner) / 2,
+        lat_max_inner,
+        f"Nowcast output domain",
+        transform=ccrs.PlateCarree(),
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        color="green",
+        #fontweight="bold",
     )
 
     gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="gray", alpha=0.5)
     gl.top_labels = False
     gl.right_labels = False
 
-    ax.set_title(f"{args.label} cut-out domain used for validation")
+    ax.set_title(f"Nowcast input domain")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
