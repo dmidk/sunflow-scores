@@ -44,6 +44,7 @@ from sunflow_scores.validator import (
     ScoreCalculator,
     GroundScoreCalculator,
     _open_with_retry,
+    _compute_scores_per_init,
 )
 
 dask.config.set(scheduler="threads")
@@ -265,10 +266,8 @@ def main() -> None:
 
     t_compute = time.perf_counter()
     try:
-        mae_by_init, rmse_by_init = _open_with_retry(
-            dask.compute, mae_by_init_lazy, rmse_by_init_lazy
-        )
-    except OSError as exc:
+        mae_by_init, rmse_by_init = _compute_scores_per_init(mae_by_init_lazy, rmse_by_init_lazy)
+    except (ValueError, OSError, AttributeError, RuntimeError, KeyError) as exc:
         _skip_day(str(exc))
         return
     stage_times["scores/compute"] = time.perf_counter() - t_compute

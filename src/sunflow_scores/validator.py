@@ -25,18 +25,18 @@ import os
 import time
 from pathlib import Path
 
+# HDF5 file locking must be disabled BEFORE the HDF5 C library is loaded
+# (i.e. before importing xarray/h5netcdf/h5py below); setting it afterwards
+# is a no-op. Locking is unreliable on networked filesystems (NFS/Lustre)
+# and causes spurious "OSError: [Errno 121] ... unable to lock file"
+# failures when reading .nc files from the mounted data drive.
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
+import dask
 import numpy as np
 import pandas as pd
 import scores.continuous
 import xarray as xr
-
-# HDF5's file-locking mechanism is unreliable (and often unsupported) on
-# networked filesystems such as NFS/Lustre, causing spurious
-# "OSError: [Errno 121] Unable to synchronously open file (unable to lock
-# file, errno = 121, error message = 'Remote I/O error')" failures when
-# reading .nc files from a mounted data drive on the server. Disabling HDF5's
-# own file locking (the same effect as `lock=False` in xarray) avoids this.
-os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 # errno values that indicate a transient/remote filesystem hiccup rather than
 # a real problem with the file itself; worth a short retry before giving up.
@@ -51,26 +51,86 @@ _TRANSIENT_IO_ERRNOS = {121, 5, 11, 116}  # Remote I/O error, I/O error, EAGAIN,
 def _open_with_retry(open_fn, *args, retries: int = 3, delay: float = 2.0, **kwargs):
     """
     Call *open_fn* (e.g. xr.open_mfdataset/xr.open_dataset), retrying a few
-    times if it fails with a transient remote-I/O / file-locking OSError.
+    times if it fails with transient remote-I/O / file-locking errors or h5netcdf
+    corruption from flaky network-filesystem access (NFS/Lustre).
 
-    This guards against flaky network-filesystem reads (NFS/Lustre) where a
-    single day can fail with errno 121 ("Remote I/O error") even though the
-    file is perfectly readable moments later.
+    This guards against spurious "OSError: [Errno 121] Remote I/O error" and
+    h5netcdf/h5py errors like "'NoneType' object has no attribute '_root'"
+    (broken file handles on network mounts).
     """
-    last_exc: OSError | None = None
+    last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
             return open_fn(*args, **kwargs)
-        except OSError as exc:
+        except (OSError, AttributeError, RuntimeError, KeyError) as exc:
             last_exc = exc
-            if getattr(exc, "errno", None) not in _TRANSIENT_IO_ERRNOS or attempt == retries:
+            is_transient_os = isinstance(exc, OSError) and getattr(exc, "errno", None) in _TRANSIENT_IO_ERRNOS
+            exc_str = str(exc).lower()
+            is_h5_corruption = isinstance(exc, (AttributeError, RuntimeError, KeyError)) and (
+                "nonetype" in exc_str or
+                "unable to synchronously" in exc_str or
+                "unable to lock" in exc_str or
+                "invalid identifier" in exc_str or
+                "_root" in exc_str or
+                "_h5file" in exc_str or
+                "_h5ds" in exc_str
+            )
+            if not (is_transient_os or is_h5_corruption) or attempt == retries:
                 raise
             print(
-                f"  WARNING: transient I/O error opening files "
-                f"(attempt {attempt}/{retries}): {exc}. Retrying in {delay:.0f}s..."
+                f"  WARNING: transient I/O / h5netcdf error "
+                f"(attempt {attempt}/{retries}): {exc.__class__.__name__}: {exc}. Retrying in {delay:.0f}s..."
             )
             time.sleep(delay)
     raise last_exc  # pragma: no cover - unreachable, satisfies type checkers
+
+def _compute_scores_per_init(mae_lazy: xr.DataArray, rmse_lazy: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
+    """
+    Compute scores by initialization_time, skipping corrupted inits on transient I/O errors.
+
+    If one initialization_time fails due to h5netcdf corruption, that init is skipped and
+    the rest of the day's data is preserved. This is better than failing the entire day
+    when only one timestep's file is unreadable.
+    """
+    inits = mae_lazy.coords["initialization_time"].values
+    mae_parts = []
+    rmse_parts = []
+    skipped_inits = []
+
+    for init in inits:
+        mae_sel = mae_lazy.sel(initialization_time=init)
+        rmse_sel = rmse_lazy.sel(initialization_time=init)
+        try:
+            mae_val, rmse_val = dask.compute(mae_sel, rmse_sel)
+            mae_parts.append(mae_val)
+            rmse_parts.append(rmse_val)
+        except (OSError, AttributeError, RuntimeError, KeyError) as exc:
+            exc_str = str(exc).lower()
+            is_h5_corruption = (
+                "nonetype" in exc_str or
+                "unable to synchronously" in exc_str or
+                "unable to lock" in exc_str or
+                "invalid identifier" in exc_str or
+                "_root" in exc_str or
+                "_h5file" in exc_str or
+                "_h5ds" in exc_str
+            )
+            if is_h5_corruption:
+                print(f"    SKIP init {init}: h5netcdf corruption ({exc.__class__.__name__})")
+                skipped_inits.append(init)
+            else:
+                raise
+
+    if not mae_parts:
+        raise ValueError("All initialization_time steps failed; day is unusable")
+
+    mae_result = xr.concat(mae_parts, dim="initialization_time")
+    rmse_result = xr.concat(rmse_parts, dim="initialization_time")
+
+    if skipped_inits:
+        print(f"    Skipped {len(skipped_inits)} corrupt init(s), computed {len(mae_parts)} inits successfully")
+
+    return mae_result, rmse_result
 
 def _parse_nowcast_timestamp(path: Path) -> pd.Timestamp | None:
     """Return the initialization time encoded in a nowcast filename, or None."""
