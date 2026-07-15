@@ -134,15 +134,30 @@ def _compute_scores_per_init(mae_lazy: xr.DataArray, rmse_lazy: xr.DataArray) ->
     mae_data = np.stack(mae_parts, axis=0)
     rmse_data = np.stack(rmse_parts, axis=0)
 
+    # Compute valid_time from initialization_time + lead_time
+    # valid_time is a 2D coordinate (init_time, lead_time)
+    valid_times = np.empty((len(inits), len(lead_times)), dtype="datetime64[ns]")
+    for i, init_t in enumerate(inits):
+        for j, lead_t in enumerate(lead_times):
+            valid_times[i, j] = np.datetime64(init_t) + lead_t
+
     mae_result = xr.DataArray(
         mae_data,
-        coords={"initialization_time": inits, "lead_time": lead_times},
+        coords={
+            "initialization_time": inits,
+            "lead_time": lead_times,
+            "valid_time": (("initialization_time", "lead_time"), valid_times),
+        },
         dims=["initialization_time", "lead_time"],
         name="mae_by_init"
     )
     rmse_result = xr.DataArray(
         rmse_data,
-        coords={"initialization_time": inits, "lead_time": lead_times},
+        coords={
+            "initialization_time": inits,
+            "lead_time": lead_times,
+            "valid_time": (("initialization_time", "lead_time"), valid_times),
+        },
         dims=["initialization_time", "lead_time"],
         name="rmse_by_init"
     )
