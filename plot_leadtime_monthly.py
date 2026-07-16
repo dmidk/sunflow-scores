@@ -141,6 +141,7 @@ def plot_leadtime_monthly(
     ax.set_xticks(x)
     ax.set_xticklabels([_month_label(m) for m in months], rotation=45, ha="right")
     ax.grid(True, axis="y", alpha=0.3)
+    ax.set_ylim(bottom=0, top=100)
     ax.legend()
 
     output_dir.mkdir(parents=True, exist_ok=True)

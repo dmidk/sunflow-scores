@@ -42,10 +42,36 @@ import xarray as xr
 # a real problem with the file itself; worth a short retry before giving up.
 _TRANSIENT_IO_ERRNOS = {121, 5, 11, 116}  # Remote I/O error, I/O error, EAGAIN, stale handle
 
+# Substrings (lower-case) seen in exception messages that indicate a corrupted
+# / flaky h5netcdf-h5py file handle rather than a genuine data problem. These
+# come from real-world observations of network-filesystem HDF5 corruption
+# (broken file handles, dangling dataset identifiers, low-level HDF5 library
+# errors surfaced through h5py). Keep this list broad but specific enough to
+# avoid masking real bugs.
+_H5_CORRUPTION_KEYWORDS = (
+    "nonetype",
+    "unable to synchronously",
+    "unable to lock",
+    "invalid identifier",
+    "invalid dataset identifier",
+    "not of specified type",
+    "_root",
+    "_h5file",
+    "h5ds",
+    "unspecified error",
+    "num_scales",
+)
+
 
 # =============================================================================
 # HELPERS
 # =============================================================================
+
+
+def _is_h5_corruption_error(exc: BaseException) -> bool:
+    """Return True if *exc* looks like transient h5netcdf/h5py file corruption."""
+    exc_str = str(exc).lower()
+    return any(keyword in exc_str for keyword in _H5_CORRUPTION_KEYWORDS)
 
 
 def _open_with_retry(open_fn, *args, retries: int = 3, delay: float = 2.0, **kwargs):
@@ -62,19 +88,11 @@ def _open_with_retry(open_fn, *args, retries: int = 3, delay: float = 2.0, **kwa
     for attempt in range(1, retries + 1):
         try:
             return open_fn(*args, **kwargs)
-        except (OSError, AttributeError, RuntimeError, KeyError) as exc:
+        except (OSError, AttributeError, RuntimeError, KeyError, ValueError, TypeError) as exc:
             last_exc = exc
             is_transient_os = isinstance(exc, OSError) and getattr(exc, "errno", None) in _TRANSIENT_IO_ERRNOS
-            exc_str = str(exc).lower()
-            is_h5_corruption = isinstance(exc, (AttributeError, RuntimeError, KeyError)) and (
-                "nonetype" in exc_str or
-                "unable to synchronously" in exc_str or
-                "unable to lock" in exc_str or
-                "invalid identifier" in exc_str or
-                "_root" in exc_str or
-                "_h5file" in exc_str or
-                "_h5ds" in exc_str
-            )
+            is_h5_corruption = isinstance(exc, (AttributeError, RuntimeError, KeyError, ValueError, TypeError)) and \
+                _is_h5_corruption_error(exc)
             if not (is_transient_os or is_h5_corruption) or attempt == retries:
                 raise
             print(
@@ -86,11 +104,15 @@ def _open_with_retry(open_fn, *args, retries: int = 3, delay: float = 2.0, **kwa
 
 def _compute_scores_per_init(mae_lazy: xr.DataArray, rmse_lazy: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
     """
-    Compute scores by initialization_time, filling corrupted inits with NaN on transient I/O errors.
+    Compute scores by initialization_time, filling corrupted (init, lead_time) steps with NaN
+    on transient I/O errors.
 
-    If one initialization_time fails due to h5netcdf corruption, that init's output is filled
-    with NaN and the rest of the day's data is preserved. All computation is eager (not lazy)
-    to avoid re-opening h5netcdf files during later operations.
+    Each initialization_time is first attempted as a single batched compute (fast path). If
+    that fails due to h5netcdf corruption, the individual lead_time steps of that init are
+    retried one by one so that only the specific corrupt lead_time(s) — i.e. the specific
+    valid_time/cut-out-domain snapshot that is actually bad — end up as NaN, instead of NaN-ing
+    the entire init (all lead times). All computation is eager (not lazy) to avoid re-opening
+    h5netcdf files during later operations.
     """
     inits = mae_lazy.coords["initialization_time"].values
     lead_times = mae_lazy.coords["lead_time"].values
@@ -98,7 +120,8 @@ def _compute_scores_per_init(mae_lazy: xr.DataArray, rmse_lazy: xr.DataArray) ->
 
     mae_parts = []
     rmse_parts = []
-    failed_inits = []
+    failed_inits = []          # inits where every lead_time was corrupt (fully NaN)
+    partial_inits = []         # inits where only some lead_time(s) were corrupt
 
     for init in inits:
         mae_sel = mae_lazy.sel(initialization_time=init)
@@ -108,24 +131,44 @@ def _compute_scores_per_init(mae_lazy: xr.DataArray, rmse_lazy: xr.DataArray) ->
             # Ensure we have numpy arrays (eager, not lazy)
             mae_parts.append(np.asarray(mae_val.values, dtype="float32"))
             rmse_parts.append(np.asarray(rmse_val.values, dtype="float32"))
+            continue
         except Exception as exc:
-            exc_str = str(exc).lower()
-            is_h5_corruption = (
-                "nonetype" in exc_str or
-                "unable to synchronously" in exc_str or
-                "unable to lock" in exc_str or
-                "invalid identifier" in exc_str or
-                "_root" in exc_str or
-                "_h5file" in exc_str or
-                "_h5ds" in exc_str
-            )
-            if is_h5_corruption:
-                print(f"    FILL init {init} with NaN: h5netcdf corruption ({exc.__class__.__name__})")
-                failed_inits.append(init)
-                mae_parts.append(np.full(n_lead, np.nan, dtype="float32"))
-                rmse_parts.append(np.full(n_lead, np.nan, dtype="float32"))
-            else:
+            if not _is_h5_corruption_error(exc):
                 raise
+            init_exc = exc
+
+        # Whole-init compute failed with a corruption-like error. Retry lead_time by
+        # lead_time so that a single bad valid_time doesn't wipe out the whole init.
+        mae_lead_vals = np.full(n_lead, np.nan, dtype="float32")
+        rmse_lead_vals = np.full(n_lead, np.nan, dtype="float32")
+        n_bad_leads = 0
+        last_lead_exc: Exception = init_exc
+        for lead_idx, lead in enumerate(lead_times):
+            try:
+                mae_lt, rmse_lt = dask.compute(
+                    mae_sel.sel(lead_time=lead), rmse_sel.sel(lead_time=lead)
+                )
+                mae_lead_vals[lead_idx] = float(np.asarray(mae_lt.values))
+                rmse_lead_vals[lead_idx] = float(np.asarray(rmse_lt.values))
+            except Exception as lead_exc:
+                if not _is_h5_corruption_error(lead_exc):
+                    raise
+                n_bad_leads += 1
+                last_lead_exc = lead_exc
+
+        mae_parts.append(mae_lead_vals)
+        rmse_parts.append(rmse_lead_vals)
+
+        if n_bad_leads == n_lead:
+            failed_inits.append(init)
+            print(f"    FILL init {init} with NaN: h5netcdf corruption ({last_lead_exc.__class__.__name__})")
+        else:
+            partial_inits.append(init)
+            print(
+                f"    PARTIAL FILL init {init}: {n_bad_leads}/{n_lead} lead_time step(s) set to "
+                f"NaN due to h5netcdf corruption ({last_lead_exc.__class__.__name__}), "
+                f"{n_lead - n_bad_leads} lead_time step(s) computed successfully"
+            )
 
     if not mae_parts:
         raise ValueError("All initialization_time steps failed; day is unusable")
@@ -162,8 +205,13 @@ def _compute_scores_per_init(mae_lazy: xr.DataArray, rmse_lazy: xr.DataArray) ->
         name="rmse_by_init"
     )
 
-    if failed_inits:
-        print(f"    Filled {len(failed_inits)} corrupt init(s) with NaN, computed {len(mae_parts) - len(failed_inits)} inits successfully")
+    n_clean_inits = len(mae_parts) - len(failed_inits) - len(partial_inits)
+    if failed_inits or partial_inits:
+        print(
+            f"    Filled {len(failed_inits)} fully corrupt init(s) with NaN, "
+            f"{len(partial_inits)} init(s) partially NaN-filled (specific lead_time steps only), "
+            f"{n_clean_inits} inits computed cleanly"
+        )
 
     return mae_result, rmse_result
 
