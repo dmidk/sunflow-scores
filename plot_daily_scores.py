@@ -143,7 +143,7 @@ def plot_day_heatmap(csv_path: Path, output_dir: Path) -> Path:
 
 
 def plot_summary(csv_dir: Path, output_dir: Path) -> Path:
-    csv_files = sorted(csv_dir.glob("scores_*.csv"))
+    csv_files = sorted(csv_dir.rglob("scores_*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No scores_*.csv files found in {csv_dir}")
 
@@ -194,7 +194,7 @@ def plot_summary(csv_dir: Path, output_dir: Path) -> Path:
 
 
 def plot_leadtime_average(csv_dir: Path, output_dir: Path) -> Path:
-    csv_files = sorted(csv_dir.glob("scores_*.csv"))
+    csv_files = sorted(csv_dir.rglob("scores_*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No scores_*.csv files found in {csv_dir}")
 
@@ -224,7 +224,7 @@ def plot_leadtime_average(csv_dir: Path, output_dir: Path) -> Path:
 
 
 def plot_init_average(csv_dir: Path, output_dir: Path) -> Path:
-    csv_files = sorted(csv_dir.glob("scores_*.csv"))
+    csv_files = sorted(csv_dir.rglob("scores_*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No scores_*.csv files found in {csv_dir}")
 
@@ -258,7 +258,7 @@ def plot_init_average(csv_dir: Path, output_dir: Path) -> Path:
 
 
 def plot_average_heatmap(csv_dir: Path, output_dir: Path) -> Path:
-    csv_files = sorted(csv_dir.glob("scores_*.csv"))
+    csv_files = sorted(csv_dir.rglob("scores_*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No scores_*.csv files found in {csv_dir}")
 

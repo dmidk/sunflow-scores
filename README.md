@@ -115,6 +115,8 @@ Each file contains by-init scores and a `lead_time_minutes` column, which is wha
 
 ## 📊 Plotting the results
 
+All plotting functions support both flat directory structures (all `scores_*.csv` files in one folder) and monthly folder structures (e.g., `results/202501/`, `results/202502/`, etc.).
+
 ### Daily plots
 Use `plot_daily_scores.py` for one daily CSV or for a directory of daily CSVs.
 
@@ -207,6 +209,45 @@ uv run python plot_seasonal_diurnal_cycles.py \
 ```
 
 The script first computes each month's diurnal-cycle average, then averages those monthly curves within each season so the three months contribute equally.
+
+### Lead-time curves (daily/monthly/yearly)
+Use `plot_leadtime_curves.py` to plot scores across lead-time horizons (0, 15min, 30min, ..., 360min) for a given day, month, or year by averaging over all initialization times.
+
+Single day:
+```bash
+uv run python plot_leadtime_curves.py \
+  --input results \
+  --date 2025-01-15 \
+  --metric both \
+  --output-dir results/plots
+```
+
+Multiple days (overlaid on same plot):
+```bash
+uv run python plot_leadtime_curves.py \
+  --input results \
+  --date 2025-01-15 2025-01-16 2025-01-17 \
+  --metric both \
+  --output-dir results/plots
+```
+
+Entire month:
+```bash
+uv run python plot_leadtime_curves.py \
+  --input results \
+  --month 2025-01 \
+  --metric mae \
+  --output-dir results/plots
+```
+
+Entire year:
+```bash
+uv run python plot_leadtime_curves.py \
+  --input results \
+  --year 2025 \
+  --metric rmse \
+  --output-dir results/plots
+```
 
 ## 🔀 Two-model comparison workflow
 This end-to-end workflow re-validates one model version and validates another over the

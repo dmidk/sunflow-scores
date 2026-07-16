@@ -87,7 +87,7 @@ def collect_monthly_scores(input_dir: Path, lead_time: int, metric: str) -> pd.D
 
     Returns a DataFrame indexed by month (YYYYMM) with one column per metric.
     """
-    csv_files = sorted(input_dir.glob("scores_*.csv"))
+    csv_files = sorted(input_dir.rglob("scores_*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No scores_*.csv files found in {input_dir}")
 
@@ -142,6 +142,7 @@ def plot_leadtime_monthly(
     ax.set_xticklabels([_month_label(m) for m in months], rotation=45, ha="right")
     ax.set_ylim(bottom=0, top=100)
     ax.grid(True, axis="y", alpha=0.3)
+    ax.set_ylim(bottom=0, top=100)
     ax.legend()
 
     output_dir.mkdir(parents=True, exist_ok=True)

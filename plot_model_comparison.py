@@ -139,7 +139,7 @@ def collect_leadtime_curve(input_dir: Path, metric: str) -> pd.DataFrame:
 
     Returns a DataFrame indexed by lead_time_minutes with one column per metric.
     """
-    csv_files = sorted(input_dir.glob("scores_*.csv"))
+    csv_files = sorted(input_dir.rglob("scores_*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No scores_*.csv files found in {input_dir}")
 
@@ -167,7 +167,7 @@ def collect_monthly_for_leadtime(
     Returns a DataFrame indexed by month (YYYYMM) with one column per metric.
     Raises ValueError if the requested lead time is absent from all CSVs.
     """
-    csv_files = sorted(input_dir.glob("scores_*.csv"))
+    csv_files = sorted(input_dir.rglob("scores_*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No scores_*.csv files found in {input_dir}")
 
