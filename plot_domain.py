@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
         nargs=4,
         type=float,
         metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"),
-        default=[7.5, 54.5, 13.0, 58.0],
+        default=[7.5, 54.5, 15.5, 58.0],
         help="Bounding box: LON_MIN LAT_MIN LON_MAX LAT_MAX (Denmark by default).",
     )
     parser.add_argument(

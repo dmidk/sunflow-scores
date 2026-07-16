@@ -140,6 +140,7 @@ def plot_leadtime_monthly(
     ax.set_ylabel("Score (W/m²)")
     ax.set_xticks(x)
     ax.set_xticklabels([_month_label(m) for m in months], rotation=45, ha="right")
+    ax.set_ylim(bottom=0, top=100)
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend()
 
