@@ -6,7 +6,7 @@ A Python framework for calculating scores of **solar irradiance (GHI)** nowcasts
 
 ## ✨ Key Features
 * **Solar Nowcasting Validation:** Evaluates 15-minute temporal resolution satellite-based predictions against satellite observations.
-* **Robust Meteorological Metrics:** Powered by the `scores` package, calculating continuous metrics (RMSE, MAE) and spatial verification metrics like the Fractions Skill Score (FSS).
+* **Robust Meteorological Metrics:** Powered by the `scores` package, calculating continuous metrics (RMSE, MAE).
 * **Dependency Management:** Uses `uv` for reproducible virtual environments.
 
 
@@ -76,7 +76,7 @@ uv run python run_validation.py \
   --end 2025-06-03 \
   --nwc-dir /path/to/nowcasts \
   --obs-dir /path/to/observations \
-  --bbox 7.5 54.5 13.0 58.0
+  --bbox 7.5 54.5 15.5 58.0
 ```
 The bounding box is applied identically to the nowcast and satellite observation grids, so the
 fast same-grid alignment stays valid. Denmark's approximate box is `7.5 54.5 13.0 58.0`.
@@ -265,7 +265,7 @@ export START_DATE=2025-01-01 END_DATE=2025-12-31
 export NWC_DIR=/path/to/model_v1.0.0/nowcasts
 export OBS_DIR=/path/to/observations
 export OUTPUT_DIR=results/v1.0.0
-export BBOX="7.5 54.5 13.0 58.0"  # Denmark
+export BBOX="7.5 54.5 15.5 58.0"  # Denmark
 bash run_validation.sh
 
 # Repeat for second model version
@@ -274,14 +274,6 @@ export OUTPUT_DIR=results/v1.0.1
 bash run_validation.sh
 ```
 
-**For DMI users** (with internal infrastructure access):
-```bash
-./run_validation_dmi.sh v1.0.0
-./run_validation_dmi.sh v1.0.1
-```
-The DMI wrapper automatically injects the Denmark bounding box and internal path structure.
-Each run loops every day of the year and writes one `scores_YYYYMMDD.csv` per day into a
-per-version output directory. The resolved paths are printed for each day.
 
 ### 2. Compare the two models with `plot_model_comparison.py`
 `plot_model_comparison.py` reads two (or more) labelled score directories and draws them on a
@@ -338,8 +330,7 @@ sunflow-scores/
 │   ├── test_model_comparison.py     # Model comparison logic tests
 │   └── test_score_computation_resilience.py  # Corruption handling tests
 ├── run_validation.py            # Daily validation script: writes one scores_YYYYMMDD.csv per run
-├── run_validation.sh            # Parameterized validation runner (external + DMI use)
-├── run_validation_dmi.sh        # DMI-internal wrapper with hardcoded paths
+├── run_validation.sh            # Parameterized validation runner
 ├── pyproject.toml               # uv dependency definitions
 ├── uv.lock                      # Strictly locked dependency hashes
 ├── .gitignore                   # Excludes data files, results, generated plots
@@ -362,13 +353,6 @@ Tests cover:
 - Model comparison logic (aggregation, filtering)
 - Resilience to HDF5 file corruption and transient I/O errors
 
-## 📋 Known Issues
-
-- **Whole-init NaN filtering removed (June 2026):** Earlier versions filtered out entire nowcasts
-  whenever `lead_time_minutes=0` had NaN values. This caused asymmetric data loss in model
-  comparisons. The filter has been removed; `pandas.groupby(...).mean()` now naturally skips
-  NaN per lead-time column. If you need to exclude bad nowcasts, apply filtering upstream in
-  your validation run or preprocess the CSV files.
 
 ## 🤝 Contributing
 

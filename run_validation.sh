@@ -26,7 +26,7 @@
 #
 # Usage (with custom bbox):
 #   export START_DATE=2025-01-01 END_DATE=2025-01-02
-#   export BBOX="2.5 54.5 16.5 57.5"  # Denmark
+#   export BBOX="7.5 54.5 15.5 58.0"  # Denmark
 #   bash run_validation.sh
 #
 # Usage (DMI internal, with tmux):
