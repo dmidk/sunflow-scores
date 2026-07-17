@@ -1,6 +1,6 @@
-# 🌦️ sunflow-scores (currently *under construction*)
+# 🌦️ sunflow-scores
 
-A Python framework for calculating scores of **solar irradiance (GHI)** nowcasts at the Danish Meteorological Institute (DMI). 
+A Python framework for calculating scores of **solar irradiance (GHI)** nowcasts. Evaluates 15-minute temporal resolution satellite-based predictions against observations. 
 
 
 
@@ -117,19 +117,21 @@ Each file contains by-init scores and a `lead_time_minutes` column, which is wha
 
 All plotting functions support both flat directory structures (all `scores_*.csv` files in one folder) and monthly folder structures (e.g., `results/202501/`, `results/202502/`, etc.).
 
+All plotting scripts are located in the `plotting/` directory. Run them with `uv run python plotting/<script>.py`.
+
 ### Daily plots
-Use `plot_daily_scores.py` for one daily CSV or for a directory of daily CSVs.
+Use `plotting/plot_daily_scores.py` for one daily CSV or for a directory of daily CSVs.
 
 Single day heatmap:
 ```bash
-uv run python plot_daily_scores.py \
+uv run python plotting/plot_daily_scores.py \
   --input results/scores_20250102.csv \
   --output-dir results/plots
 ```
 
 Monthly summary over all daily CSVs in a directory:
 ```bash
-uv run python plot_daily_scores.py \
+uv run python plotting/plot_daily_scores.py \
   --input results \
   --summary \
   --output-dir results/plots
@@ -137,7 +139,7 @@ uv run python plot_daily_scores.py \
 
 Monthly average heatmap by initialization time and lead time:
 ```bash
-uv run python plot_daily_scores.py \
+uv run python plotting/plot_daily_scores.py \
   --input results \
   --average-heatmap \
   --output-dir results/plots
@@ -150,7 +152,7 @@ Use `plot_monthly_heatmaps.py` to write one summary plot and one averaged heatma
 
 Plot both summary and averaged heatmaps for both metrics:
 ```bash
-uv run python plot_monthly_heatmaps.py \
+uv run python plotting/plot_monthly_heatmaps.py \
   --input results \
   --summary \
   --heatmap \
@@ -160,7 +162,7 @@ uv run python plot_monthly_heatmaps.py \
 
 Only summary MAE plots:
 ```bash
-uv run python plot_monthly_heatmaps.py \
+uv run python plotting/plot_monthly_heatmaps.py \
   --input results \
   --summary \
   --metric mae \
@@ -169,7 +171,7 @@ uv run python plot_monthly_heatmaps.py \
 
 Only averaged RMSE heatmaps:
 ```bash
-uv run python plot_monthly_heatmaps.py \
+uv run python plotting/plot_monthly_heatmaps.py \
   --input results \
   --heatmap \
   --metric rmse \
@@ -184,7 +186,7 @@ Use `plot_leadtime_monthly.py` to extract only one lead time of choice (e.g. the
 time as one bar per calendar month.
 
 ```bash
-uv run python plot_leadtime_monthly.py \
+uv run python plotting/plot_leadtime_monthly.py \
   --input results \
   --lead-time 60 \
   --metric both \
@@ -202,7 +204,7 @@ Use `plot_seasonal_diurnal_cycles.py` to average the monthly diurnal-cycle curve
 
 Example for MAE only:
 ```bash
-uv run python plot_seasonal_diurnal_cycles.py \
+uv run python plotting/plot_seasonal_diurnal_cycles.py \
   --input results \
   --metric mae \
   --output-dir results/seasonal_plots
@@ -215,7 +217,7 @@ Use `plot_leadtime_curves.py` to plot scores across lead-time horizons (0, 15min
 
 Single day:
 ```bash
-uv run python plot_leadtime_curves.py \
+uv run python plotting/plot_leadtime_curves.py \
   --input results \
   --date 2025-01-15 \
   --metric both \
@@ -224,7 +226,7 @@ uv run python plot_leadtime_curves.py \
 
 Multiple days (overlaid on same plot):
 ```bash
-uv run python plot_leadtime_curves.py \
+uv run python plotting/plot_leadtime_curves.py \
   --input results \
   --date 2025-01-15 2025-01-16 2025-01-17 \
   --metric both \
@@ -233,7 +235,7 @@ uv run python plot_leadtime_curves.py \
 
 Entire month:
 ```bash
-uv run python plot_leadtime_curves.py \
+uv run python plotting/plot_leadtime_curves.py \
   --input results \
   --month 2025-01 \
   --metric mae \
@@ -242,7 +244,7 @@ uv run python plot_leadtime_curves.py \
 
 Entire year:
 ```bash
-uv run python plot_leadtime_curves.py \
+uv run python plotting/plot_leadtime_curves.py \
   --input results \
   --year 2025 \
   --metric rmse \
@@ -250,23 +252,36 @@ uv run python plot_leadtime_curves.py \
 ```
 
 ## 🔀 Two-model comparison workflow
-This end-to-end workflow re-validates one model version and validates another over the
-**same Denmark cut-out domain** for a full year, then overlays their scores on shared
-comparison figures. It can be reproduced for any future pair of model versions.
+This end-to-end workflow validates two model versions over the **same domain** for a date range,
+then overlays their scores on shared comparison figures. It can be adapted for any pair of
+models and any domain.
 
-### 1. Run the yearly Denmark-domain validation per version
-`run_validation_denmark.sh` takes the model version as its only argument, always injects the
-Denmark bounding box (`7.5 54.5 13.0 58.0`), loops every day of the year, and writes one
-`scores_YYYYMMDD.csv` per day into a per-version output directory. Run it once per version:
+### 1. Run validation for each model version
+Use the parameterized `run_validation.sh` script or the DMI-specific wrapper `run_validation_dmi.sh`.
+
+**For external users** (local data directories):
 ```bash
-./run_validation_denmark.sh v1.0.0
-./run_validation_denmark.sh v1.0.1
+export START_DATE=2025-01-01 END_DATE=2025-12-31
+export NWC_DIR=/path/to/model_v1.0.0/nowcasts
+export OBS_DIR=/path/to/observations
+export OUTPUT_DIR=results/v1.0.0
+export BBOX="7.5 54.5 13.0 58.0"  # Denmark
+bash run_validation.sh
+
+# Repeat for second model version
+export NWC_DIR=/path/to/model_v1.0.1/nowcasts
+export OUTPUT_DIR=results/v1.0.1
+bash run_validation.sh
 ```
-Each run resolves its nowcast input (`.../sunflow_validation_output/<version>`), the shared
-observation directory, and its own scores output
-(`.../sunflow_validation_scores/2025_denmark/<version>`); the resolved paths and the exact
-`run_validation.py --bbox 7.5 54.5 13.0 58.0` command are printed for each day. This leaves
-two directories of daily CSVs — one per model — to compare.
+
+**For DMI users** (with internal infrastructure access):
+```bash
+./run_validation_dmi.sh v1.0.0
+./run_validation_dmi.sh v1.0.1
+```
+The DMI wrapper automatically injects the Denmark bounding box and internal path structure.
+Each run loops every day of the year and writes one `scores_YYYYMMDD.csv` per day into a
+per-version output directory. The resolved paths are printed for each day.
 
 ### 2. Compare the two models with `plot_model_comparison.py`
 `plot_model_comparison.py` reads two (or more) labelled score directories and draws them on a
@@ -274,7 +289,7 @@ single figure. It has two modes.
 
 **Lead-time line graph (0 → 360 min)** — one line per model:
 ```bash
-uv run python plot_model_comparison.py \
+uv run python plotting/plot_model_comparison.py \
   --inputs /path/to/scores/v1.0.0 /path/to/scores/v1.0.1 \
   --labels v1.0.0 v1.0.1 \
   --mode leadtime-line \
@@ -285,7 +300,7 @@ Writes `comparison_leadtime_line_<metric>.png`.
 
 **Monthly bar chart at the 15- and 30-minute horizons** — grouped bars per model per month:
 ```bash
-uv run python plot_model_comparison.py \
+uv run python plotting/plot_model_comparison.py \
   --inputs /path/to/scores/v1.0.0 /path/to/scores/v1.0.1 \
   --labels v1.0.0 v1.0.1 \
   --mode monthly-bars \
@@ -303,22 +318,67 @@ missing lead time is raised. Coverage may differ between models (missing days/mo
 aggregation is a mean over available days, so both curves/bars still render for the data present.
 
 ## 📂 Project Structure
-The core library code lives under `src/sunflow_scores/`.
 ```text
 sunflow-scores/
 ├── src/
 │   └── sunflow_scores/
 │       ├── __init__.py
-│       ├── validator.py      # Core library: SatelliteNowcastLoader,
-│                             # SatelliteObservationLoader, ScoreCalculator
-├── run_validation.py         # Daily validation script: writes one scores_YYYYMMDD.csv per run
-├── plot_daily_scores.py      # Plot one day or a directory of daily CSVs
-├── plot_monthly_heatmaps.py  # Plot monthly summaries / averaged heatmaps from daily CSVs
-├── plot_leadtime_monthly.py  # Plot per-month scores for a single chosen lead time
-├── plot_seasonal_diurnal_cycles.py  # Plot 4-season averages of monthly diurnal-cycle curves
-├── plot_model_comparison.py  # Compare two model versions: lead-time line + monthly bars
-├── run_validation_denmark.sh # Year-long Denmark-domain validation runner (per model version)
-├── pyproject.toml            # uv dependency definitions
-├── uv.lock                   # Strictly locked dependency hashes
-├── .gitignore                # Excludes data files and results
+│       ├── validator.py         # Core library: SatelliteNowcastLoader, SatelliteObservationLoader,
+│       │                         # ScoreCalculator, GroundScoreCalculator
+│       └── plot_utils.py        # Shared plotting utilities (CSV loading, metric columns, helpers)
+├── plotting/
+│   ├── plot_daily_scores.py         # Plot one day or a directory of daily CSVs (heatmaps)
+│   ├── plot_monthly_heatmaps.py     # Plot monthly summaries / averaged heatmaps from daily CSVs
+│   ├── plot_leadtime_monthly.py     # Plot per-month scores for a single chosen lead time
+│   ├── plot_leadtime_curves.py      # Plot scores across lead-time horizons (0–360 min)
+│   ├── plot_seasonal_diurnal_cycles.py  # Plot 4-season averages of monthly diurnal-cycle curves
+│   └── plot_model_comparison.py     # Compare two model versions: lead-time line + monthly bars
+├── tests/
+│   ├── test_validation.py           # Validation pipeline tests
+│   ├── test_model_comparison.py     # Model comparison logic tests
+│   └── test_score_computation_resilience.py  # Corruption handling tests
+├── run_validation.py            # Daily validation script: writes one scores_YYYYMMDD.csv per run
+├── run_validation.sh            # Parameterized validation runner (external + DMI use)
+├── run_validation_dmi.sh        # DMI-internal wrapper with hardcoded paths
+├── pyproject.toml               # uv dependency definitions
+├── uv.lock                      # Strictly locked dependency hashes
+├── .gitignore                   # Excludes data files, results, generated plots
 └── README.md
+```
+
+- Core library code lives under `src/sunflow_scores/`
+- Plotting scripts are organized in `plotting/` for easy discovery and maintenance
+- Run plotting scripts with `uv run python plotting/<script>.py`
+
+## 🧪 Testing
+
+Run the test suite with:
+```bash
+pytest tests/
+```
+
+Tests cover:
+- Validation pipeline correctness (data loading, alignment, score computation)
+- Model comparison logic (aggregation, filtering)
+- Resilience to HDF5 file corruption and transient I/O errors
+
+## 📋 Known Issues
+
+- **Whole-init NaN filtering removed (June 2026):** Earlier versions filtered out entire nowcasts
+  whenever `lead_time_minutes=0` had NaN values. This caused asymmetric data loss in model
+  comparisons. The filter has been removed; `pandas.groupby(...).mean()` now naturally skips
+  NaN per lead-time column. If you need to exclude bad nowcasts, apply filtering upstream in
+  your validation run or preprocess the CSV files.
+
+## 🤝 Contributing
+
+Contributions are welcome. For bug reports or feature requests, open an issue on GitHub.
+When submitting PRs:
+- Include tests for new functionality
+- Update the README if adding new scripts or CLI arguments
+- Run `pytest` before submitting
+- Ensure code follows the project's import/style patterns (see existing scripts)
+
+## 📄 License
+
+MIT. See LICENSE file for details.
