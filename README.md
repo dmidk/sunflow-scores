@@ -79,7 +79,7 @@ uv run python run_validation.py \
   --bbox 7.5 54.5 15.5 58.0
 ```
 The bounding box is applied identically to the nowcast and satellite observation grids, so the
-fast same-grid alignment stays valid. Denmark's approximate box is `7.5 54.5 13.0 58.0`.
+fast same-grid alignment stays valid. Denmark's approximate box is `7.5 54.5 15.5 58.0`.
 
 ### Custom variable names
 If your files use different variable names, pass them explicitly:
@@ -102,7 +102,7 @@ uv run python run_validation.py \
 | `--nwc-dir` | Directory containing the nowcast NetCDF files. | Yes | |
 | `--obs-dir` | Directory containing the observation NetCDF files. | Yes | |
 | `--output-dir` | Directory where the output score files are written. | No | `results` |
-| `--bbox` | Restrict validation to a geographic bounding box: `LON_MIN LAT_MIN LON_MAX LAT_MAX` (e.g. Denmark: `7.5 54.5 13.0 58.0`). | No | none (whole domain) |
+| `--bbox` | Restrict validation to a geographic bounding box: `LON_MIN LAT_MIN LON_MAX LAT_MAX` (e.g. Denmark: `7.5 54.5 15.5 58.0`). | No | none (whole domain) |
 | `--nowcast_ghi_var` | GHI variable in the nowcast files. | No | `probabilistic_advection` |
 | `--obs_ghi_var` | GHI variable in the observation files. | No | `sds` |
 | `--obs_cs_ghi_var` | Clear-sky GHI variable in the observation files. | No | `sds_cs` |
